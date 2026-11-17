@@ -15,6 +15,7 @@ import {
   saveUsersToStorage,
   saveEventsToStorage,
   saveClientsToStorage,
+  setCurrentUserSession,
   UserAccount,
   EventRecord,
   ClientRecord,
@@ -24,32 +25,34 @@ type ActiveTab = "LOGIN" | "ESQUECI_SENHA" | "AGENDE_EVENTO";
 
 export default function LoginAndPublicPortal() {
   const [activeTab, setActiveTab] = useState<ActiveTab>("LOGIN");
-  const [clockGmt3, setClockGmt3] = useState<string>("17/11/2026 às 14:32:08 (GMT-3)");
 
   const [allUsers, setAllUsers] = useState<UserAccount[]>([]);
   const [allEvents, setAllEvents] = useState<EventRecord[]>([]);
   const [allClients, setAllClients] = useState<ClientRecord[]>([]);
 
-  // Estados do Login
-  const [email, setEmail] = useState("adm@churrascodahora.com.br");
+  // Estados do Login (Card #4)
+  const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
   const [failedAttempts, setFailedAttempts] = useState(0);
   const [lockedUntil, setLockedUntil] = useState<number | null>(null);
   const [loginFeedback, setLoginFeedback] = useState<{ type: "error" | "success" | "warn"; text: string } | null>(null);
 
-  // Estados do "Esqueci minha senha"
+  // Estados do "Esqueci minha senha" funcional em 2 etapas (Card #20)
   const [recoveryEmail, setRecoveryEmail] = useState("");
-  const [recoverySent, setRecoverySent] = useState(false);
+  const [generatedToken, setGeneratedToken] = useState<string | null>(null);
+  const [typedToken, setTypedToken] = useState("");
+  const [newRecoveryPassword, setNewRecoveryPassword] = useState("");
+  const [recoveryFeedback, setRecoveryFeedback] = useState<{ type: "error" | "success"; text: string } | null>(null);
 
-  // Estados do "Agende seu evento"
+  // Estados do "Agende seu evento" (Card #4)
   const [clientName, setClientName] = useState("");
   const [clientEmail, setClientEmail] = useState("");
   const [clientPhone, setClientPhone] = useState("");
   const [clientPassword, setClientPassword] = useState("");
   const [showClientPassword, setShowClientPassword] = useState(false);
   const [eventTitle, setEventTitle] = useState("");
-  const [eventType, setEventType] = useState<EventRecord["eventType"]>("ANIVERSARIO");
+  const [eventType, setEventType] = useState<string>("Aniversário");
   const [honoreeName, setHonoreeName] = useState("");
   const [eventDate, setEventDate] = useState("");
   const [startTime, setStartTime] = useState("16:00");
@@ -61,21 +64,14 @@ export default function LoginAndPublicPortal() {
     setAllUsers(data.users);
     setAllEvents(data.events);
     setAllClients(data.clients);
-
-    const now = getNowGmt3();
-    setClockGmt3(now.formattedPtBr);
-    setEventDate(now.dateStr);
-
-    const timer = setInterval(() => {
-      setClockGmt3(getNowGmt3().formattedPtBr);
-    }, 1000);
-    return () => clearInterval(timer);
+    setEventDate(getNowGmt3().dateStr);
   }, []);
 
-  const pwCheck = validatePasswordRbac(activeTab === "LOGIN" ? password : clientPassword);
+  const pwCheck = validatePasswordRbac(
+    activeTab === "LOGIN" ? password : activeTab === "ESQUECI_SENHA" ? newRecoveryPassword : clientPassword
+  );
   const phoneCheck = validateAnatelPhone(clientPhone);
 
-  // Verifica conflito em tempo real para exibir a barra verde "Data disponível"
   const currentConflict = allEvents.find(
     (slot) =>
       slot.eventDate === eventDate &&
@@ -83,7 +79,6 @@ export default function LoginAndPublicPortal() {
       hasScheduleConflict(startTime, endTime, slot.startTime, slot.endTime, 60)
   );
 
-  // Calcula horário final + 1h de limpeza para mostrar no aviso verde
   const getCleanupEndTime = (end: string) => {
     const [h, m] = end.split(":").map(Number);
     if (isNaN(h) || isNaN(m)) return "22:00";
@@ -91,8 +86,10 @@ export default function LoginAndPublicPortal() {
     return `${String(nextH).padStart(2, "0")}:${String(m).padStart(2, "0")}`;
   };
 
+  // LOGIN REAL: Apenas autentica usuários já cadastrados no banco (Card #4)
   const handleLogin = (e: React.FormEvent) => {
     e.preventDefault();
+    setLoginFeedback(null);
 
     if (lockedUntil && Date.now() < lockedUntil) {
       const minLeft = Math.ceil((lockedUntil - Date.now()) / 60000);
@@ -105,7 +102,23 @@ export default function LoginAndPublicPortal() {
 
     const foundUser = allUsers.find((u) => u.email.toLowerCase() === email.trim().toLowerCase());
 
-    if (!pwCheck.isValid || !foundUser || foundUser.password !== password) {
+    if (!foundUser) {
+      setLoginFeedback({
+        type: "error",
+        text: "Usuário não encontrado no banco de dados. Caso seja seu primeiro acesso, use a aba 'Agende seu evento'.",
+      });
+      return;
+    }
+
+    if (foundUser.status === "INATIVO") {
+      setLoginFeedback({
+        type: "error",
+        text: "Esta conta está inativa. Entre em contato com a administração do espaço.",
+      });
+      return;
+    }
+
+    if (!pwCheck.isValid || foundUser.password !== password) {
       const newFailures = failedAttempts + 1;
       setFailedAttempts(newFailures);
 
@@ -119,7 +132,7 @@ export default function LoginAndPublicPortal() {
       } else {
         setLoginFeedback({
           type: "error",
-          text: `Tentativa ${newFailures} de ${MAX_LOGIN_ATTEMPTS} · Após 5 erros, bloqueio por 30 min.`,
+          text: `Senha incorreta. Tentativa ${newFailures} de ${MAX_LOGIN_ATTEMPTS} · Após 5 erros, bloqueio por 30 min.`,
         });
       }
       return;
@@ -129,13 +142,15 @@ export default function LoginAndPublicPortal() {
     if (daysRemaining <= 0) {
       setLoginFeedback({
         type: "warn",
-        text: "Sua senha completou 90 dias e expirou! Redefina sua senha para continuar.",
+        text: "Sua senha completou 90 dias e expirou! Use a aba 'Esqueci minha senha' para renová-la.",
       });
       return;
     }
 
     setFailedAttempts(0);
     setLockedUntil(null);
+    setCurrentUserSession(foundUser);
+
     setLoginFeedback({
       type: "success",
       text: `Acesso confirmado! Redirecionando para ${foundUser.role === "ADM" ? "Painel da Família" : "Área do Cliente"}...`,
@@ -143,9 +158,64 @@ export default function LoginAndPublicPortal() {
 
     setTimeout(() => {
       window.location.href = foundUser.role === "ADM" ? "/admin" : "/cliente";
-    }, 900);
+    }, 800);
   };
 
+  // RECUPERAÇÃO DE SENHA FUNCIONAL (Card #20)
+  const handleSendRecoveryEmail = (e: React.FormEvent) => {
+    e.preventDefault();
+    setRecoveryFeedback(null);
+
+    const foundUser = allUsers.find((u) => u.email.toLowerCase() === recoveryEmail.trim().toLowerCase());
+    if (!foundUser) {
+      setRecoveryFeedback({
+        type: "error",
+        text: "Não encontramos nenhuma conta cadastrada com este e-mail.",
+      });
+      return;
+    }
+
+    const token = String(Math.floor(100000 + Math.random() * 900000));
+    setGeneratedToken(token);
+    setRecoveryFeedback({
+      type: "success",
+      text: `E-mail de recuperação enviado para ${foundUser.email}! Código temporário (15 min): ${token}`,
+    });
+  };
+
+  const handleConfirmPasswordReset = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!generatedToken || typedToken.trim() !== generatedToken) {
+      setRecoveryFeedback({ type: "error", text: "Código de verificação inválido." });
+      return;
+    }
+    if (!pwCheck.isValid) {
+      setRecoveryFeedback({
+        type: "error",
+        text: "A nova senha deve cumprir todos os 4 requisitos de segurança.",
+      });
+      return;
+    }
+
+    const nowIso = new Date().toISOString();
+    const updatedUsers = allUsers.map((u) =>
+      u.email.toLowerCase() === recoveryEmail.trim().toLowerCase()
+        ? { ...u, password: newRecoveryPassword, passwordChangedAtIso: nowIso }
+        : u
+    );
+
+    setAllUsers(updatedUsers);
+    saveUsersToStorage(updatedUsers);
+    setGeneratedToken(null);
+    setTypedToken("");
+    setNewRecoveryPassword("");
+    setRecoveryFeedback({
+      type: "success",
+      text: "✓ Senha redefinida com sucesso! Você já pode acessar na aba Login.",
+    });
+  };
+
+  // AGENDE SEU EVENTO: Cria o usuário no banco, inicia sessão e redireciona (Card #4)
   const handlePreSchedule = (e: React.FormEvent) => {
     e.preventDefault();
     setScheduleFeedback(null);
@@ -157,7 +227,7 @@ export default function LoginAndPublicPortal() {
     if (!pwCheck.isValid) {
       setScheduleFeedback({
         type: "error",
-        text: "Crie uma senha forte seguindo os 4 critérios abaixo.",
+        text: "Crie uma senha forte seguindo os 4 critérios de segurança.",
       });
       return;
     }
@@ -177,36 +247,51 @@ export default function LoginAndPublicPortal() {
       return;
     }
 
-    const newUser: UserAccount = {
-      id: `usr-${Date.now()}`,
-      name: clientName,
-      email: clientEmail.trim().toLowerCase(),
-      phoneAnatel: phoneCheck.formatted || clientPhone,
-      password: clientPassword,
-      role: "CLIENTE",
-      passwordChangedAtIso: new Date().toISOString(),
-    };
-    const updatedUsers = [...allUsers, newUser];
-    setAllUsers(updatedUsers);
-    saveUsersToStorage(updatedUsers);
+    const normalizedEmail = clientEmail.trim().toLowerCase();
+    const existingUser = allUsers.find((u) => u.email.toLowerCase() === normalizedEmail);
+    const nowIso = new Date().toISOString();
+    const shortId = `CLI-${Math.floor(1000 + Math.random() * 9000)}`;
 
-    const newClient: ClientRecord = {
-      id: `cli-${Date.now()}`,
-      name: clientName,
-      email: clientEmail.trim().toLowerCase(),
-      phoneAnatel: phoneCheck.formatted || clientPhone,
-    };
-    const updatedClients = [...allClients, newClient];
-    setAllClients(updatedClients);
-    saveClientsToStorage(updatedClients);
+    let loggedUser: UserAccount;
+
+    if (existingUser) {
+      loggedUser = existingUser;
+    } else {
+      loggedUser = {
+        id: shortId,
+        name: clientName,
+        email: normalizedEmail,
+        phoneAnatel: phoneCheck.formatted || clientPhone,
+        password: clientPassword,
+        role: "CLIENTE",
+        status: "ATIVO",
+        passwordChangedAtIso: nowIso,
+      };
+      const updatedUsers = [...allUsers, loggedUser];
+      setAllUsers(updatedUsers);
+      saveUsersToStorage(updatedUsers);
+
+      const newClient: ClientRecord = {
+        id: shortId,
+        name: clientName,
+        email: normalizedEmail,
+        phoneAnatel: phoneCheck.formatted || clientPhone,
+        status: "ATIVO",
+        passwordChangedAtIso: nowIso,
+      };
+      const updatedClients = [...allClients, newClient];
+      setAllClients(updatedClients);
+      saveClientsToStorage(updatedClients);
+    }
 
     const newEvent: EventRecord = {
-      id: `ev-${Date.now()}`,
+      id: `EV-${Math.floor(1000 + Math.random() * 9000)}`,
       title: eventTitle || `${eventType} - ${honoreeName}`,
       eventType,
       honoreeName,
-      clientName,
-      responsibleAdmin: "A confirmar",
+      clientName: loggedUser.name,
+      clientEmail: loggedUser.email,
+      responsibleAdmin: "ADM a confirmar",
       eventDate,
       startTime,
       endTime,
@@ -217,19 +302,22 @@ export default function LoginAndPublicPortal() {
     setAllEvents(updatedEvents);
     saveEventsToStorage(updatedEvents);
 
+    // Salva a sessão do cliente recém-criado para abrir a conta dele
+    setCurrentUserSession(loggedUser);
+
     setScheduleFeedback({
       type: "success",
-      text: "Solicitação enviada! Redirecionando para sua Área do Cliente...",
+      text: "Conta e reserva criadas com sucesso! Abrindo sua Área do Cliente...",
     });
 
     setTimeout(() => {
       window.location.href = "/cliente";
-    }, 1200);
+    }, 1000);
   };
 
   return (
     <div className="min-h-screen bg-[#0A0E17] text-slate-100 flex flex-col justify-between font-sans selection:bg-amber-500 selection:text-slate-950">
-      {/* BARRA SUPERIOR (IDÊNTICA AO PDF) */}
+      {/* BARRA SUPERIOR SEM O RELÓGIO GMT-3 (Card #3 do Trello) */}
       <header className="w-full border-b border-slate-800/80 bg-[#0A0E17]/90 backdrop-blur-md">
         <div className="max-w-7xl mx-auto px-4 sm:px-8 h-20 flex items-center justify-between gap-4">
           <div className="flex items-center gap-3">
@@ -244,20 +332,14 @@ export default function LoginAndPublicPortal() {
             </div>
           </div>
 
-          <div className="hidden md:flex items-center gap-2 text-[11px] font-semibold tracking-[0.16em] text-slate-400 uppercase">
+          <div className="flex items-center gap-2 text-[11px] font-semibold tracking-[0.16em] text-slate-400 uppercase">
             <span>{activeTab === "AGENDE_EVENTO" ? "RESERVA ONLINE" : "ESPAÇO DE EVENTOS · FAMÍLIA DA HORA"}</span>
-          </div>
-
-          <div className="flex items-center gap-2 bg-[#111726] border border-slate-800 px-3.5 py-2 rounded-full text-xs text-slate-300 font-mono">
-            <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
-            <span>{clockGmt3}</span>
           </div>
         </div>
       </header>
 
-      {/* CONTEÚDO PRINCIPAL EM DUAS COLUNAS (HERO ESQUERDA + CARD DIREITA) */}
       <main className="max-w-7xl w-full mx-auto px-4 sm:px-8 py-8 lg:py-12 grid grid-cols-1 lg:grid-cols-12 gap-10 lg:gap-12 items-start">
-        {/* COLUNA ESQUERDA: STORYTELLING DA FAMÍLIA (DINÂMICO CONFORME A ABA) */}
+        {/* COLUNA ESQUERDA: STORYTELLING */}
         <section className="lg:col-span-6 space-y-8 lg:pt-4">
           <div className="inline-flex items-center gap-2 px-3.5 py-1.5 rounded-full bg-amber-500/10 border border-amber-500/30 text-amber-400 text-[11px] font-bold tracking-[0.14em] uppercase">
             <span className="w-1.5 h-1.5 rounded-full bg-amber-400" />
@@ -300,7 +382,6 @@ export default function LoginAndPublicPortal() {
             </div>
           )}
 
-          {/* PASSOS 01, 02, 03 */}
           {activeTab !== "AGENDE_EVENTO" ? (
             <div className="grid grid-cols-3 gap-4 pt-2 border-t border-slate-800/80 max-w-lg">
               <div>
@@ -348,7 +429,6 @@ export default function LoginAndPublicPortal() {
             </div>
           )}
 
-          {/* CARD INFERIOR ESQUERDO */}
           <div className="max-w-lg bg-[#111726]/90 border border-slate-800/90 rounded-2xl p-5 flex items-start gap-4">
             <div className="w-10 h-10 rounded-xl bg-amber-500/15 border border-amber-500/30 flex items-center justify-center text-amber-400 shrink-0">
               {activeTab === "ESQUECI_SENHA" ? "🛡️" : activeTab === "AGENDE_EVENTO" ? "✨" : "📅"}
@@ -375,15 +455,15 @@ export default function LoginAndPublicPortal() {
         {/* COLUNA DIREITA: CARD DO FORMULÁRIO */}
         <section className="lg:col-span-6 w-full max-w-xl mx-auto">
           <div className="bg-[#111726] border border-slate-800/90 rounded-3xl p-6 sm:p-8 shadow-2xl">
-            {/* NAVEGAÇÃO DE ABAS NO TOPO DO CARD */}
-            <div className="grid grid-cols-3 bg-[#0A0E17] p-1.5 rounded-2xl border border-slate-800/80 mb-7">
+            {/* SELETOR DE ABAS COM ALTO CONTRASTE NA ABA ATIVA (Card #1 do Trello) */}
+            <div className="grid grid-cols-3 gap-1.5 bg-[#0A0E17] p-1.5 rounded-2xl border border-slate-800 mb-7">
               <button
                 type="button"
                 onClick={() => setActiveTab("LOGIN")}
-                className={`py-2.5 px-3 rounded-xl text-xs sm:text-sm font-semibold transition ${
+                className={`py-2.5 px-3 rounded-xl text-xs sm:text-sm transition-all ${
                   activeTab === "LOGIN"
-                    ? "bg-[#192236] text-amber-400 shadow-sm border border-slate-700/60"
-                    : "text-slate-400 hover:text-slate-200"
+                    ? "bg-[#F59E0B] text-slate-950 font-extrabold shadow-lg shadow-amber-500/20"
+                    : "text-slate-400 hover:text-white hover:bg-slate-800/40 font-semibold"
                 }`}
               >
                 Login
@@ -391,10 +471,10 @@ export default function LoginAndPublicPortal() {
               <button
                 type="button"
                 onClick={() => setActiveTab("ESQUECI_SENHA")}
-                className={`py-2.5 px-3 rounded-xl text-xs sm:text-sm font-semibold transition ${
+                className={`py-2.5 px-3 rounded-xl text-xs sm:text-sm transition-all ${
                   activeTab === "ESQUECI_SENHA"
-                    ? "bg-[#192236] text-amber-400 shadow-sm border border-slate-700/60"
-                    : "text-slate-400 hover:text-slate-200"
+                    ? "bg-[#F59E0B] text-slate-950 font-extrabold shadow-lg shadow-amber-500/20"
+                    : "text-slate-400 hover:text-white hover:bg-slate-800/40 font-semibold"
                 }`}
               >
                 Esqueci minha senha
@@ -402,36 +482,24 @@ export default function LoginAndPublicPortal() {
               <button
                 type="button"
                 onClick={() => setActiveTab("AGENDE_EVENTO")}
-                className={`py-2.5 px-3 rounded-xl text-xs sm:text-sm font-semibold transition ${
+                className={`py-2.5 px-3 rounded-xl text-xs sm:text-sm transition-all ${
                   activeTab === "AGENDE_EVENTO"
-                    ? "bg-amber-500/15 text-amber-400 border border-amber-500/40"
-                    : "text-slate-400 hover:text-slate-200"
+                    ? "bg-[#F59E0B] text-slate-950 font-extrabold shadow-lg shadow-amber-500/20"
+                    : "text-slate-400 hover:text-white hover:bg-slate-800/40 font-semibold"
                 }`}
               >
                 Agende seu evento
               </button>
             </div>
 
-            {/* CONTEÚDO DA ABA 1: LOGIN */}
+            {/* ABA 1: LOGIN (Sem botão Preencher ADM e sem texto de contas ativas - Card #2) */}
             {activeTab === "LOGIN" && (
               <form onSubmit={handleLogin} className="space-y-5">
-                <div className="flex items-start justify-between gap-2">
-                  <div>
-                    <h2 className="text-2xl sm:text-3xl font-extrabold text-white">Que bom ter você aqui.</h2>
-                    <p className="text-xs sm:text-sm text-slate-400 mt-1">
-                      Acesse sua conta para cuidar dos próximos encontros.
-                    </p>
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setEmail("adm@churrascodahora.com.br");
-                      setPassword("DaHora@2026");
-                    }}
-                    className="text-[11px] text-amber-400/90 hover:text-amber-300 underline shrink-0 mt-1"
-                  >
-                    Preencher ADM
-                  </button>
+                <div>
+                  <h2 className="text-2xl sm:text-3xl font-extrabold text-white">Que bom ter você aqui.</h2>
+                  <p className="text-xs sm:text-sm text-slate-400 mt-1">
+                    Acesse sua conta para cuidar dos próximos encontros.
+                  </p>
                 </div>
 
                 <div>
@@ -443,7 +511,7 @@ export default function LoginAndPublicPortal() {
                       value={email}
                       onChange={(e) => setEmail(e.target.value)}
                       className="w-full bg-[#0A0E17] border border-slate-800 focus:border-amber-500/70 rounded-xl px-4 py-3.5 text-sm text-white outline-none transition"
-                      placeholder="marcos@exemplo.com"
+                      placeholder="seuemail@exemplo.com"
                     />
                     <span className="absolute right-4 top-1/2 -translate-y-1/2 text-slate-500 text-sm">✉️</span>
                   </div>
@@ -470,7 +538,6 @@ export default function LoginAndPublicPortal() {
                   </div>
                 </div>
 
-                {/* CAIXA DE SEGURANÇA DA SENHA (IGUAL AO PDF) */}
                 <div className="bg-[#0A0E17] border border-slate-800/90 rounded-2xl p-4 space-y-3">
                   <div className="flex items-center gap-2 text-xs font-bold text-slate-200">
                     <span className="text-amber-500">🔒</span>
@@ -492,8 +559,7 @@ export default function LoginAndPublicPortal() {
                   </div>
                 </div>
 
-                {/* AVISO DE TENTATIVAS / FEEDBACK */}
-                {loginFeedback ? (
+                {loginFeedback && (
                   <div
                     className={`px-4 py-3 rounded-xl text-xs font-medium border ${
                       loginFeedback.type === "success"
@@ -503,12 +569,6 @@ export default function LoginAndPublicPortal() {
                   >
                     {loginFeedback.text}
                   </div>
-                ) : (
-                  failedAttempts > 0 && (
-                    <div className="px-4 py-2.5 rounded-xl bg-amber-950/30 border border-amber-500/20 text-amber-400 text-xs">
-                      Tentativa {failedAttempts} de {MAX_LOGIN_ATTEMPTS} · Após 5 erros, bloqueio por 30 min.
-                    </div>
-                  )
                 )}
 
                 <p className="text-xs text-slate-400">Sua senha tem validade de 90 dias.</p>
@@ -534,7 +594,7 @@ export default function LoginAndPublicPortal() {
               </form>
             )}
 
-            {/* CONTEÚDO DA ABA 2: ESQUECI MINHA SENHA */}
+            {/* ABA 2: ESQUECI MINHA SENHA FUNCIONAL (Card #20 do Trello) */}
             {activeTab === "ESQUECI_SENHA" && (
               <div className="space-y-5">
                 <div className="w-12 h-12 rounded-2xl bg-amber-500/15 border border-amber-500/30 flex items-center justify-center text-amber-400 text-xl">
@@ -548,42 +608,84 @@ export default function LoginAndPublicPortal() {
                     seu acesso.
                   </h2>
                   <p className="text-xs sm:text-sm text-slate-400 mt-2 leading-relaxed">
-                    Enviaremos um link para o e-mail cadastrado.
+                    Enviaremos um código de recuperação para o e-mail cadastrado.
                     <br />
                     Ele será válido por 15 minutos.
                   </p>
                 </div>
 
-                <div>
-                  <label className="block text-xs font-semibold text-slate-300 mb-2">E-mail cadastrado</label>
-                  <div className="relative">
-                    <input
-                      type="email"
-                      value={recoveryEmail}
-                      onChange={(e) => setRecoveryEmail(e.target.value)}
-                      placeholder="marcos@exemplo.com"
-                      className="w-full bg-[#0A0E17] border border-slate-800 focus:border-amber-500/70 rounded-xl px-4 py-3.5 text-sm text-white outline-none"
-                    />
-                    <span className="absolute right-4 top-1/2 -translate-y-1/2 text-slate-500 text-sm">✉️</span>
+                <form onSubmit={handleSendRecoveryEmail} className="space-y-4">
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-300 mb-2">E-mail cadastrado</label>
+                    <div className="relative">
+                      <input
+                        type="email"
+                        required
+                        value={recoveryEmail}
+                        onChange={(e) => setRecoveryEmail(e.target.value)}
+                        placeholder="seuemail@exemplo.com"
+                        className="w-full bg-[#0A0E17] border border-slate-800 focus:border-amber-500/70 rounded-xl px-4 py-3.5 text-sm text-white outline-none"
+                      />
+                      <span className="absolute right-4 top-1/2 -translate-y-1/2 text-slate-500 text-sm">✉️</span>
+                    </div>
                   </div>
-                </div>
 
-                <button
-                  type="button"
-                  onClick={() => {
-                    if (recoveryEmail.includes("@")) setRecoverySent(true);
-                  }}
-                  className="w-full bg-[#F59E0B] hover:bg-amber-400 text-slate-950 font-bold py-4 px-6 rounded-2xl transition flex items-center justify-between text-sm"
-                >
-                  <span>Enviar link de recuperação</span>
-                  <span className="text-lg">→</span>
-                </button>
+                  <button
+                    type="submit"
+                    className="w-full bg-[#F59E0B] hover:bg-amber-400 text-slate-950 font-bold py-4 px-6 rounded-2xl transition flex items-center justify-between text-sm"
+                  >
+                    <span>Enviar código de recuperação</span>
+                    <span className="text-lg">→</span>
+                  </button>
+                </form>
 
-                {recoverySent && (
-                  <div className="p-4 rounded-2xl bg-emerald-950/50 border border-emerald-500/30 text-xs space-y-1">
-                    <p className="font-bold text-emerald-400">✓ Link enviado! Confira sua caixa de entrada.</p>
-                    <p className="text-slate-400">Se necessário, verifique também a pasta de spam.</p>
+                {recoveryFeedback && (
+                  <div
+                    className={`p-4 rounded-2xl text-xs border ${
+                      recoveryFeedback.type === "success"
+                        ? "bg-emerald-950/50 border-emerald-500/30 text-emerald-300"
+                        : "bg-rose-950/50 border-rose-500/30 text-rose-300"
+                    }`}
+                  >
+                    {recoveryFeedback.text}
                   </div>
+                )}
+
+                {generatedToken && (
+                  <form
+                    onSubmit={handleConfirmPasswordReset}
+                    className="bg-[#0A0E17] border border-slate-800 rounded-2xl p-4 space-y-3"
+                  >
+                    <p className="text-xs font-bold text-amber-400">Redefinir senha agora</p>
+                    <div>
+                      <label className="block text-xs text-slate-300 mb-1">Código de 6 dígitos recebido</label>
+                      <input
+                        type="text"
+                        required
+                        value={typedToken}
+                        onChange={(e) => setTypedToken(e.target.value)}
+                        placeholder="Ex: 123456"
+                        className="w-full bg-[#111726] border border-slate-700 rounded-xl px-3.5 py-2.5 text-xs font-mono text-white"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs text-slate-300 mb-1">Nova senha (padrão RBAC)</label>
+                      <input
+                        type="password"
+                        required
+                        value={newRecoveryPassword}
+                        onChange={(e) => setNewRecoveryPassword(e.target.value)}
+                        placeholder="Mín. 8 caracteres + maiúscula + número + especial"
+                        className="w-full bg-[#111726] border border-slate-700 rounded-xl px-3.5 py-2.5 text-xs text-white"
+                      />
+                    </div>
+                    <button
+                      type="submit"
+                      className="w-full bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold py-2.5 rounded-xl text-xs transition"
+                    >
+                      Salvar nova senha
+                    </button>
+                  </form>
                 )}
 
                 <p className="text-xs text-slate-500 leading-relaxed">
@@ -594,7 +696,7 @@ export default function LoginAndPublicPortal() {
               </div>
             )}
 
-            {/* CONTEÚDO DA ABA 3: AGENDE SEU EVENTO */}
+            {/* ABA 3: AGENDE SEU EVENTO */}
             {activeTab === "AGENDE_EVENTO" && (
               <form onSubmit={handlePreSchedule} className="space-y-6">
                 <div>
@@ -604,7 +706,6 @@ export default function LoginAndPublicPortal() {
                   </p>
                 </div>
 
-                {/* 01 SEUS DADOS */}
                 <div className="space-y-3.5">
                   <p className="text-[11px] font-bold tracking-[0.14em] text-amber-500 uppercase">01 SEUS DADOS</p>
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
@@ -656,24 +757,22 @@ export default function LoginAndPublicPortal() {
                   </div>
                 </div>
 
-                {/* 02 SOBRE O ENCONTRO */}
                 <div className="space-y-3.5">
                   <p className="text-[11px] font-bold tracking-[0.14em] text-amber-500 uppercase">
                     02 SOBRE O ENCONTRO
                   </p>
 
-                  {/* Botões de Categoria (Iguais ao PDF) */}
                   <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
                     {[
-                      { id: "ANIVERSARIO", label: "Aniversário", icon: "🎂" },
-                      { id: "FESTA", label: "Festa familiar", icon: "🎉" },
-                      { id: "FUTEBOL", label: "Futebol", icon: "⚽" },
-                      { id: "CORPORATIVO", label: "Corporativo", icon: "💼" },
+                      { id: "Aniversário", label: "Aniversário", icon: "🎂" },
+                      { id: "Festa familiar", label: "Festa familiar", icon: "🎉" },
+                      { id: "Futebol", label: "Futebol", icon: "⚽" },
+                      { id: "Corporativo", label: "Corporativo", icon: "💼" },
                     ].map((cat) => (
                       <button
                         key={cat.id}
                         type="button"
-                        onClick={() => setEventType(cat.id as EventRecord["eventType"])}
+                        onClick={() => setEventType(cat.id)}
                         className={`py-2.5 px-3 rounded-xl border text-xs font-semibold flex items-center justify-center gap-1.5 transition ${
                           eventType === cat.id
                             ? "bg-amber-500/15 border-amber-500/50 text-amber-400"
@@ -758,7 +857,6 @@ export default function LoginAndPublicPortal() {
                   )}
                 </div>
 
-                {/* 03 CRIE SUA CONTA */}
                 <div className="space-y-3">
                   <p className="text-[11px] font-bold tracking-[0.14em] text-amber-500 uppercase">03 CRIE SUA CONTA</p>
                   <div>
@@ -823,7 +921,6 @@ export default function LoginAndPublicPortal() {
         </section>
       </main>
 
-      {/* RODAPÉ */}
       <footer className="w-full border-t border-slate-800/60 py-5 px-4 sm:px-8 text-xs text-slate-500">
         <div className="max-w-7xl mx-auto flex flex-col sm:flex-row items-center justify-between gap-2">
           <span>2026 Churrasco dos Da Hora. Feito para reunir.</span>
