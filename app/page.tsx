@@ -11,24 +11,22 @@ import {
   LOCKOUT_MINUTES,
 } from "../lib/services/rbacAndTime";
 import {
-  loadInitialData,
+  fetchAllFromSupabase,
   saveUsersToStorage,
   saveEventsToStorage,
-  saveClientsToStorage,
   setCurrentUserSession,
   UserAccount,
   EventRecord,
-  ClientRecord,
 } from "../lib/services/storage";
 
 type ActiveTab = "LOGIN" | "ESQUECI_SENHA" | "AGENDE_EVENTO";
 
 export default function LoginAndPublicPortal() {
   const [activeTab, setActiveTab] = useState<ActiveTab>("LOGIN");
+  const [isLoadingCloud, setIsLoadingCloud] = useState<boolean>(true);
 
   const [allUsers, setAllUsers] = useState<UserAccount[]>([]);
   const [allEvents, setAllEvents] = useState<EventRecord[]>([]);
-  const [allClients, setAllClients] = useState<ClientRecord[]>([]);
 
   // Estados do Login
   const [email, setEmail] = useState("");
@@ -60,11 +58,12 @@ export default function LoginAndPublicPortal() {
   const [scheduleFeedback, setScheduleFeedback] = useState<{ type: "error" | "success"; text: string } | null>(null);
 
   useEffect(() => {
-    const data = loadInitialData();
-    setAllUsers(data.users);
-    setAllEvents(data.events);
-    setAllClients(data.clients);
     setEventDate(getNowGmt3().dateStr);
+    fetchAllFromSupabase().then((cloudData) => {
+      setAllUsers(cloudData.users);
+      setAllEvents(cloudData.events);
+      setIsLoadingCloud(false);
+    });
   }, []);
 
   const pwCheck = validatePasswordRbac(
@@ -86,8 +85,8 @@ export default function LoginAndPublicPortal() {
     return `${String(nextH).padStart(2, "0")}:${String(m).padStart(2, "0")}`;
   };
 
-  // LOGIN UNIFICADO PARA OS 4 PERFIS (ADM, EQUIPE_INTERNA, EQUIPE_EXTERNA, CLIENTE)
-  const handleLogin = (e: React.FormEvent) => {
+  // LOGIN CONSULTANDO DIRETAMENTE O SUPABASE EM TEMPO REAL
+  const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoginFeedback(null);
 
@@ -100,14 +99,15 @@ export default function LoginAndPublicPortal() {
       return;
     }
 
-    // Recarrega do localStorage no momento do clique para garantir que qualquer conta recém-criada pelo ADM seja lida
-    const latestData = loadInitialData();
-    const foundUser = latestData.users.find((u) => u.email.toLowerCase() === email.trim().toLowerCase());
+    const cloudData = await fetchAllFromSupabase();
+    setAllUsers(cloudData.users);
+
+    const foundUser = cloudData.users.find((u) => u.email.toLowerCase() === email.trim().toLowerCase());
 
     if (!foundUser) {
       setLoginFeedback({
         type: "error",
-        text: "E-mail não encontrado no sistema. Cadastre-se em 'Agende seu evento' ou peça ao ADM para cadastrar seu perfil.",
+        text: "E-mail não encontrado no Supabase. Cadastre-se em 'Agende seu evento' ou peça ao ADM para criar seu perfil.",
       });
       return;
     }
@@ -160,35 +160,26 @@ export default function LoginAndPublicPortal() {
         ? "/cliente"
         : "/equipe";
 
-    const roleLabel =
-      foundUser.role === "ADM"
-        ? "Administrador"
-        : foundUser.role === "EQUIPE_INTERNA"
-        ? "Equipe Interna"
-        : foundUser.role === "EQUIPE_EXTERNA"
-        ? "Equipe Externa"
-        : "Cliente";
-
     setLoginFeedback({
       type: "success",
-      text: `Bem-vindo(a), ${foundUser.name} (${roleLabel})! Redirecionando...`,
+      text: `Autenticado no Supabase! Bem-vindo(a), ${foundUser.name} (${foundUser.role})...`,
     });
 
     setTimeout(() => {
       window.location.href = targetRoute;
-    }, 700);
+    }, 600);
   };
 
-  const handleSendRecoveryEmail = (e: React.FormEvent) => {
+  const handleSendRecoveryEmail = async (e: React.FormEvent) => {
     e.preventDefault();
     setRecoveryFeedback(null);
 
-    const latestUsers = loadInitialData().users;
-    const foundUser = latestUsers.find((u) => u.email.toLowerCase() === recoveryEmail.trim().toLowerCase());
+    const cloudData = await fetchAllFromSupabase();
+    const foundUser = cloudData.users.find((u) => u.email.toLowerCase() === recoveryEmail.trim().toLowerCase());
     if (!foundUser) {
       setRecoveryFeedback({
         type: "error",
-        text: "Não encontramos nenhuma conta cadastrada com este e-mail.",
+        text: "Não encontramos nenhuma conta no Supabase com este e-mail.",
       });
       return;
     }
@@ -197,11 +188,11 @@ export default function LoginAndPublicPortal() {
     setGeneratedToken(token);
     setRecoveryFeedback({
       type: "success",
-      text: `E-mail enviado para ${foundUser.email}! Código temporário (15 min): ${token}`,
+      text: `Código gerado para ${foundUser.email} (válido por 15 min): ${token}`,
     });
   };
 
-  const handleConfirmPasswordReset = (e: React.FormEvent) => {
+  const handleConfirmPasswordReset = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!generatedToken || typedToken.trim() !== generatedToken) {
       setRecoveryFeedback({ type: "error", text: "Código de verificação inválido." });
@@ -216,8 +207,8 @@ export default function LoginAndPublicPortal() {
     }
 
     const nowIso = new Date().toISOString();
-    const latestUsers = loadInitialData().users;
-    const updatedUsers = latestUsers.map((u) =>
+    const cloudData = await fetchAllFromSupabase();
+    const updatedUsers = cloudData.users.map((u) =>
       u.email.toLowerCase() === recoveryEmail.trim().toLowerCase()
         ? { ...u, password: newRecoveryPassword, passwordChangedAtIso: nowIso }
         : u
@@ -230,11 +221,11 @@ export default function LoginAndPublicPortal() {
     setNewRecoveryPassword("");
     setRecoveryFeedback({
       type: "success",
-      text: "✓ Senha redefinida com sucesso! Você já pode entrar na aba Login.",
+      text: "✓ Senha atualizada no Supabase! Você já pode entrar na aba Login.",
     });
   };
 
-  const handlePreSchedule = (e: React.FormEvent) => {
+  const handlePreSchedule = async (e: React.FormEvent) => {
     e.preventDefault();
     setScheduleFeedback(null);
 
@@ -265,9 +256,9 @@ export default function LoginAndPublicPortal() {
       return;
     }
 
-    const latest = loadInitialData();
+    const cloudData = await fetchAllFromSupabase();
     const normalizedEmail = clientEmail.trim().toLowerCase();
-    const existingUser = latest.users.find((u) => u.email.toLowerCase() === normalizedEmail);
+    const existingUser = cloudData.users.find((u) => u.email.toLowerCase() === normalizedEmail);
     const nowIso = new Date().toISOString();
     const shortId = `CLI-${Math.floor(1000 + Math.random() * 9000)}`;
 
@@ -286,21 +277,9 @@ export default function LoginAndPublicPortal() {
         status: "ATIVO",
         passwordChangedAtIso: nowIso,
       };
-      const updatedUsers = [...latest.users, loggedUser];
+      const updatedUsers = [loggedUser, ...cloudData.users];
       setAllUsers(updatedUsers);
       saveUsersToStorage(updatedUsers);
-
-      const newClient: ClientRecord = {
-        id: shortId,
-        name: clientName,
-        email: normalizedEmail,
-        phoneAnatel: phoneCheck.formatted || clientPhone,
-        status: "ATIVO",
-        passwordChangedAtIso: nowIso,
-      };
-      const updatedClients = [...latest.clients, newClient];
-      setAllClients(updatedClients);
-      saveClientsToStorage(updatedClients);
     }
 
     const newEvent: EventRecord = {
@@ -317,7 +296,7 @@ export default function LoginAndPublicPortal() {
       status: "PENDENTE",
       supportTeam: ["A definir pelo ADM"],
     };
-    const updatedEvents = [newEvent, ...latest.events];
+    const updatedEvents = [newEvent, ...cloudData.events];
     setAllEvents(updatedEvents);
     saveEventsToStorage(updatedEvents);
 
@@ -325,7 +304,7 @@ export default function LoginAndPublicPortal() {
 
     setScheduleFeedback({
       type: "success",
-      text: "Conta e reserva criadas com sucesso! Abrindo sua Área do Cliente...",
+      text: "Conta e reserva salvas no Supabase! Abrindo sua Área do Cliente...",
     });
 
     setTimeout(() => {
@@ -350,7 +329,8 @@ export default function LoginAndPublicPortal() {
           </div>
 
           <div className="flex items-center gap-2 text-[11px] font-semibold tracking-[0.16em] text-slate-400 uppercase">
-            <span>{activeTab === "AGENDE_EVENTO" ? "RESERVA ONLINE" : "ESPAÇO DE EVENTOS · FAMÍLIA DA HORA"}</span>
+            <span className="w-2 h-2 rounded-full bg-emerald-400" />
+            <span>{isLoadingCloud ? "CONECTANDO SUPABASE..." : "SUPABASE CLOUD CONECTADO"}</span>
           </div>
         </div>
       </header>
@@ -364,38 +344,14 @@ export default function LoginAndPublicPortal() {
               : "BONS MOMENTOS, BEM ORGANIZADOS"}
           </div>
 
-          {activeTab === "LOGIN" && (
-            <div className="space-y-4">
-              <h1 className="text-4xl sm:text-5xl lg:text-[54px] font-extrabold tracking-tight leading-[1.08] text-white">
-                Os melhores <span className="text-amber-500">encontros</span> começam aqui.
-              </h1>
-              <p className="text-base sm:text-lg text-slate-400 max-w-xl leading-relaxed">
-                Acesso unificado para Administradores, Equipe Interna, Equipe Externa e Clientes.
-              </p>
-            </div>
-          )}
-
-          {activeTab === "ESQUECI_SENHA" && (
-            <div className="space-y-4">
-              <h1 className="text-4xl sm:text-5xl lg:text-[54px] font-extrabold tracking-tight leading-[1.08] text-white">
-                Um novo acesso. Os mesmos <span className="text-amber-500">bons encontros.</span>
-              </h1>
-              <p className="text-base sm:text-lg text-slate-400 max-w-xl leading-relaxed">
-                Recupere sua conta com tranquilidade e volte a cuidar do que importa.
-              </p>
-            </div>
-          )}
-
-          {activeTab === "AGENDE_EVENTO" && (
-            <div className="space-y-4">
-              <h1 className="text-4xl sm:text-5xl lg:text-[54px] font-extrabold tracking-tight leading-[1.08] text-white">
-                Tem um encontro <span className="text-amber-500">em mente?</span>
-              </h1>
-              <p className="text-base sm:text-lg text-slate-400 max-w-xl leading-relaxed">
-                A gente cuida do espaço. Você coleciona os bons momentos.
-              </p>
-            </div>
-          )}
+          <div className="space-y-4">
+            <h1 className="text-4xl sm:text-5xl lg:text-[54px] font-extrabold tracking-tight leading-[1.08] text-white">
+              Os melhores <span className="text-amber-500">encontros</span> começam aqui.
+            </h1>
+            <p className="text-base sm:text-lg text-slate-400 max-w-xl leading-relaxed">
+              Acesso em nuvem via Supabase para Administradores, Equipe Interna, Equipe Externa e Clientes.
+            </p>
+          </div>
 
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 pt-2 border-t border-slate-800/80 max-w-lg text-xs">
             <div className="bg-[#111726] border border-slate-800 p-3 rounded-xl">
@@ -466,17 +422,14 @@ export default function LoginAndPublicPortal() {
 
                 <div>
                   <label className="block text-xs font-semibold text-slate-300 mb-2">E-mail</label>
-                  <div className="relative">
-                    <input
-                      type="email"
-                      required
-                      value={email}
-                      onChange={(e) => setEmail(e.target.value)}
-                      className="w-full bg-[#0A0E17] border border-slate-800 focus:border-amber-500/70 rounded-xl px-4 py-3.5 text-sm text-white outline-none transition"
-                      placeholder="seuemail@exemplo.com"
-                    />
-                    <span className="absolute right-4 top-1/2 -translate-y-1/2 text-slate-500 text-sm">✉️</span>
-                  </div>
+                  <input
+                    type="email"
+                    required
+                    value={email}
+                    onChange={(e) => setEmail(e.target.value)}
+                    className="w-full bg-[#0A0E17] border border-slate-800 focus:border-amber-500/70 rounded-xl px-4 py-3.5 text-sm text-white outline-none transition"
+                    placeholder="seuemail@exemplo.com"
+                  />
                 </div>
 
                 <div>
@@ -545,19 +498,7 @@ export default function LoginAndPublicPortal() {
 
             {activeTab === "ESQUECI_SENHA" && (
               <div className="space-y-5">
-                <div className="w-12 h-12 rounded-2xl bg-amber-500/15 border border-amber-500/30 flex items-center justify-center text-amber-400 text-xl">
-                  ✉️
-                </div>
-
-                <div>
-                  <h2 className="text-2xl sm:text-3xl font-extrabold text-white leading-tight">
-                    Vamos recuperar seu acesso.
-                  </h2>
-                  <p className="text-xs sm:text-sm text-slate-400 mt-2">
-                    Enviaremos um código de recuperação para o seu e-mail cadastrado.
-                  </p>
-                </div>
-
+                <h2 className="text-2xl font-extrabold text-white">Recuperar acesso</h2>
                 <form onSubmit={handleSendRecoveryEmail} className="space-y-4">
                   <div>
                     <label className="block text-xs font-semibold text-slate-300 mb-2">E-mail cadastrado</label>
@@ -570,24 +511,16 @@ export default function LoginAndPublicPortal() {
                       className="w-full bg-[#0A0E17] border border-slate-800 rounded-xl px-4 py-3.5 text-sm text-white outline-none"
                     />
                   </div>
-
                   <button
                     type="submit"
-                    className="w-full bg-[#F59E0B] hover:bg-amber-400 text-slate-950 font-bold py-4 px-6 rounded-2xl transition flex items-center justify-between text-sm"
+                    className="w-full bg-[#F59E0B] hover:bg-amber-400 text-slate-950 font-bold py-4 px-6 rounded-2xl transition text-sm"
                   >
-                    <span>Enviar código de recuperação</span>
-                    <span className="text-lg">→</span>
+                    Enviar código de recuperação →
                   </button>
                 </form>
 
                 {recoveryFeedback && (
-                  <div
-                    className={`p-4 rounded-2xl text-xs border ${
-                      recoveryFeedback.type === "success"
-                        ? "bg-emerald-950/50 border-emerald-500/30 text-emerald-300"
-                        : "bg-rose-950/50 border-rose-500/30 text-rose-300"
-                    }`}
-                  >
+                  <div className="p-4 rounded-2xl text-xs border bg-emerald-950/50 border-emerald-500/30 text-emerald-300">
                     {recoveryFeedback.text}
                   </div>
                 )}
@@ -597,9 +530,8 @@ export default function LoginAndPublicPortal() {
                     onSubmit={handleConfirmPasswordReset}
                     className="bg-[#0A0E17] border border-slate-800 rounded-2xl p-4 space-y-3"
                   >
-                    <p className="text-xs font-bold text-amber-400">Redefinir senha agora</p>
                     <div>
-                      <label className="block text-xs text-slate-300 mb-1">Código de 6 dígitos recebido</label>
+                      <label className="block text-xs text-slate-300 mb-1">Código de 6 dígitos</label>
                       <input
                         type="text"
                         required
@@ -622,7 +554,7 @@ export default function LoginAndPublicPortal() {
                       type="submit"
                       className="w-full bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold py-2.5 rounded-xl text-xs transition"
                     >
-                      Salvar nova senha
+                      Salvar nova senha no Supabase
                     </button>
                   </form>
                 )}
@@ -630,152 +562,125 @@ export default function LoginAndPublicPortal() {
             )}
 
             {activeTab === "AGENDE_EVENTO" && (
-              <form onSubmit={handlePreSchedule} className="space-y-6">
-                <div>
-                  <h2 className="text-2xl font-extrabold text-white">Vamos planejar seu evento</h2>
-                  <p className="text-xs sm:text-sm text-slate-400 mt-1">
-                    Preencha os detalhes. Sua conta de Cliente já será criada automaticamente.
-                  </p>
-                </div>
-
-                <div className="space-y-3.5">
-                  <p className="text-[11px] font-bold tracking-[0.14em] text-amber-500 uppercase">01 SEUS DADOS</p>
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
-                    <div>
-                      <label className="block text-xs font-medium text-slate-300 mb-1.5">Nome completo</label>
-                      <input
-                        type="text"
-                        required
-                        value={clientName}
-                        onChange={(e) => setClientName(e.target.value)}
-                        placeholder="Marcos Oliveira"
-                        className="w-full bg-[#0A0E17] border border-slate-800 rounded-xl px-3.5 py-3 text-sm text-white"
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-xs font-medium text-slate-300 mb-1.5">E-mail</label>
-                      <input
-                        type="email"
-                        required
-                        value={clientEmail}
-                        onChange={(e) => setClientEmail(e.target.value)}
-                        placeholder="marcos@exemplo.com"
-                        className="w-full bg-[#0A0E17] border border-slate-800 rounded-xl px-3.5 py-3 text-sm text-white"
-                      />
-                    </div>
-                  </div>
-
+              <form onSubmit={handlePreSchedule} className="space-y-5">
+                <h2 className="text-2xl font-extrabold text-white">Vamos planejar seu evento</h2>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
                   <div>
-                    <label className="block text-xs font-medium text-slate-300 mb-1.5">Telefone ANATEL</label>
-                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 items-center">
-                      <input
-                        type="tel"
-                        required
-                        value={clientPhone}
-                        onChange={(e) => setClientPhone(applyAnatelPhoneMask(e.target.value))}
-                        placeholder="(11) 99987-6543"
-                        className="w-full bg-[#0A0E17] border border-slate-800 rounded-xl px-3.5 py-3 text-sm font-mono text-white"
-                      />
-                      {phoneCheck.valid && (
-                        <div className="px-3.5 py-2.5 rounded-xl bg-emerald-950/50 border border-emerald-500/30 text-emerald-400 text-xs font-semibold">
-                          ✓ {phoneCheck.regionUf?.replace(" - ", " · ")}
-                        </div>
-                      )}
-                    </div>
+                    <label className="block text-xs font-medium text-slate-300 mb-1">Nome completo</label>
+                    <input
+                      type="text"
+                      required
+                      value={clientName}
+                      onChange={(e) => setClientName(e.target.value)}
+                      className="w-full bg-[#0A0E17] border border-slate-800 rounded-xl px-3.5 py-3 text-sm text-white"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-medium text-slate-300 mb-1">E-mail</label>
+                    <input
+                      type="email"
+                      required
+                      value={clientEmail}
+                      onChange={(e) => setClientEmail(e.target.value)}
+                      className="w-full bg-[#0A0E17] border border-slate-800 rounded-xl px-3.5 py-3 text-sm text-white"
+                    />
                   </div>
                 </div>
 
-                <div className="space-y-3.5">
-                  <p className="text-[11px] font-bold tracking-[0.14em] text-amber-500 uppercase">
-                    02 SOBRE O ENCONTRO
-                  </p>
-                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                    <div>
-                      <label className="block text-xs font-medium text-slate-300 mb-1.5">Categoria *</label>
-                      <input
-                        type="text"
-                        required
-                        value={eventType}
-                        onChange={(e) => setEventType(e.target.value)}
-                        placeholder="Ex: Aniversário"
-                        className="w-full bg-[#0A0E17] border border-slate-800 rounded-xl px-3.5 py-3 text-sm text-white"
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-xs font-medium text-slate-300 mb-1.5">
-                        Para quem é o evento? *
-                      </label>
-                      <input
-                        type="text"
-                        required
-                        value={honoreeName}
-                        onChange={(e) => setHonoreeName(e.target.value)}
-                        placeholder="Ana Clara · 15 anos"
-                        className="w-full bg-[#0A0E17] border border-slate-800 rounded-xl px-3.5 py-3 text-sm text-white"
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-xs font-medium text-slate-300 mb-1.5">Título do evento</label>
-                      <input
-                        type="text"
-                        required
-                        value={eventTitle}
-                        onChange={(e) => setEventTitle(e.target.value)}
-                        placeholder="Festa da Ana"
-                        className="w-full bg-[#0A0E17] border border-slate-800 rounded-xl px-3.5 py-3 text-sm text-white"
-                      />
-                    </div>
-                  </div>
-
-                  <div className="grid grid-cols-3 gap-3">
-                    <div>
-                      <label className="block text-xs font-medium text-slate-300 mb-1.5">Data do evento</label>
-                      <input
-                        type="date"
-                        required
-                        value={eventDate}
-                        onChange={(e) => setEventDate(e.target.value)}
-                        className="w-full bg-[#0A0E17] border border-slate-800 rounded-xl px-3 py-2.5 text-xs text-white"
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-xs font-medium text-slate-300 mb-1.5">Início</label>
-                      <input
-                        type="time"
-                        required
-                        value={startTime}
-                        onChange={(e) => setStartTime(e.target.value)}
-                        className="w-full bg-[#0A0E17] border border-slate-800 rounded-xl px-3 py-2.5 text-xs text-white"
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-xs font-medium text-slate-300 mb-1.5">Término</label>
-                      <input
-                        type="time"
-                        required
-                        value={endTime}
-                        onChange={(e) => setEndTime(e.target.value)}
-                        className="w-full bg-[#0A0E17] border border-slate-800 rounded-xl px-3 py-2.5 text-xs text-white"
-                      />
-                    </div>
-                  </div>
-
-                  {!currentConflict && (
-                    <div className="px-4 py-2.5 rounded-xl bg-emerald-950/50 border border-emerald-500/30 text-emerald-400 text-xs font-medium">
-                      ✓ Data disponível · Intervalo de limpeza até {getCleanupEndTime(endTime)}
-                    </div>
-                  )}
+                <div>
+                  <label className="block text-xs font-medium text-slate-300 mb-1">Telefone ANATEL</label>
+                  <input
+                    type="tel"
+                    required
+                    value={clientPhone}
+                    onChange={(e) => setClientPhone(applyAnatelPhoneMask(e.target.value))}
+                    placeholder="(11) 99987-6543"
+                    className="w-full bg-[#0A0E17] border border-slate-800 rounded-xl px-3.5 py-3 text-sm font-mono text-white"
+                  />
                 </div>
 
-                <div className="space-y-3">
-                  <p className="text-[11px] font-bold tracking-[0.14em] text-amber-500 uppercase">03 CRIE SUA SENHA RBAC</p>
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                  <div>
+                    <label className="block text-xs font-medium text-slate-300 mb-1">Categoria *</label>
+                    <input
+                      type="text"
+                      required
+                      value={eventType}
+                      onChange={(e) => setEventType(e.target.value)}
+                      className="w-full bg-[#0A0E17] border border-slate-800 rounded-xl px-3.5 py-3 text-sm text-white"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-medium text-slate-300 mb-1">Para quem é? *</label>
+                    <input
+                      type="text"
+                      required
+                      value={honoreeName}
+                      onChange={(e) => setHonoreeName(e.target.value)}
+                      className="w-full bg-[#0A0E17] border border-slate-800 rounded-xl px-3.5 py-3 text-sm text-white"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-medium text-slate-300 mb-1">Título</label>
+                    <input
+                      type="text"
+                      required
+                      value={eventTitle}
+                      onChange={(e) => setEventTitle(e.target.value)}
+                      className="w-full bg-[#0A0E17] border border-slate-800 rounded-xl px-3.5 py-3 text-sm text-white"
+                    />
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-3 gap-3">
+                  <div>
+                    <label className="block text-xs font-medium text-slate-300 mb-1">Data</label>
+                    <input
+                      type="date"
+                      required
+                      value={eventDate}
+                      onChange={(e) => setEventDate(e.target.value)}
+                      className="w-full bg-[#0A0E17] border border-slate-800 rounded-xl px-3 py-2.5 text-xs text-white"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-medium text-slate-300 mb-1">Início</label>
+                    <input
+                      type="time"
+                      required
+                      value={startTime}
+                      onChange={(e) => setStartTime(e.target.value)}
+                      className="w-full bg-[#0A0E17] border border-slate-800 rounded-xl px-3 py-2.5 text-xs text-white"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-medium text-slate-300 mb-1">Término</label>
+                    <input
+                      type="time"
+                      required
+                      value={endTime}
+                      onChange={(e) => setEndTime(e.target.value)}
+                      className="w-full bg-[#0A0E17] border border-slate-800 rounded-xl px-3 py-2.5 text-xs text-white"
+                    />
+                  </div>
+                </div>
+
+                {!currentConflict && (
+                  <div className="px-4 py-2 rounded-xl bg-emerald-950/50 border border-emerald-500/30 text-emerald-400 text-xs">
+                    ✓ Data disponível · Intervalo de limpeza até {getCleanupEndTime(endTime)}
+                  </div>
+                )}
+
+                <div>
+                  <label className="block text-xs font-medium text-slate-300 mb-1">
+                    Crie sua senha RBAC (mín. 8 caracteres + especial) *
+                  </label>
                   <div className="relative">
                     <input
                       type={showClientPassword ? "text" : "password"}
                       required
                       value={clientPassword}
                       onChange={(e) => setClientPassword(e.target.value)}
-                      placeholder="••••••••••••"
                       className="w-full bg-[#0A0E17] border border-slate-800 rounded-xl px-3.5 py-3 text-sm text-white"
                     />
                     <button
@@ -786,39 +691,19 @@ export default function LoginAndPublicPortal() {
                       {showClientPassword ? "🙈" : "👁️"}
                     </button>
                   </div>
-
-                  <div className="flex flex-wrap gap-x-4 gap-y-1 text-[11px]">
-                    <span className={pwCheck.minLength ? "text-emerald-400 font-bold" : "text-slate-500"}>
-                      ✓ Mínimo 8 caracteres
-                    </span>
-                    <span className={pwCheck.hasSpecial ? "text-emerald-400 font-bold" : "text-slate-500"}>
-                      ✓ Caractere especial (!@#$)
-                    </span>
-                    <span className={pwCheck.hasUpper && pwCheck.hasLower ? "text-emerald-400" : "text-slate-500"}>
-                      ✓ Maiúscula e minúscula
-                    </span>
-                    <span className={pwCheck.hasNumber ? "text-emerald-400" : "text-slate-500"}>✓ Número</span>
-                  </div>
                 </div>
 
                 {scheduleFeedback && (
-                  <div
-                    className={`p-3.5 rounded-xl text-xs font-medium border ${
-                      scheduleFeedback.type === "success"
-                        ? "bg-emerald-950/60 border-emerald-500 text-emerald-200"
-                        : "bg-rose-950/60 border-rose-500 text-rose-200"
-                    }`}
-                  >
+                  <div className="p-3.5 rounded-xl text-xs font-medium border bg-emerald-950/60 border-emerald-500 text-emerald-200">
                     {scheduleFeedback.text}
                   </div>
                 )}
 
                 <button
                   type="submit"
-                  className="w-full bg-[#10B981] hover:bg-emerald-400 text-slate-950 font-bold py-4 px-6 rounded-2xl transition flex items-center justify-center gap-2 text-sm shadow-lg shadow-emerald-500/10"
+                  className="w-full bg-[#10B981] hover:bg-emerald-400 text-slate-950 font-bold py-4 px-6 rounded-2xl transition text-sm"
                 >
-                  <span>Confirmar solicitação de agendamento</span>
-                  <span>→</span>
+                  Confirmar solicitação de agendamento →
                 </button>
               </form>
             )}
