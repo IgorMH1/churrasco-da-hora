@@ -1,5 +1,7 @@
 // src/lib/services/storage.ts
-// Gerenciador de Dados, Sessão Real de Login e Integração Google Calendar
+// Banco de Dados Unificado com 4 Perfis RBAC: ADM, EQUIPE_INTERNA, EQUIPE_EXTERNA e CLIENTE
+
+export type UserRole = "ADM" | "EQUIPE_INTERNA" | "EQUIPE_EXTERNA" | "CLIENTE";
 
 export interface UserAccount {
   id: string;
@@ -8,22 +10,25 @@ export interface UserAccount {
   phoneAnatel: string;
   cpfCnpj?: string;
   password: string;
-  role: "ADM" | "CLIENTE";
-  status?: "ATIVO" | "INATIVO";
+  role: UserRole;
+  specialty?: string;
+  companyName?: string;
+  dailyRate?: number;
+  status: "ATIVO" | "INATIVO";
   passwordChangedAtIso: string;
 }
 
 export interface StaffMember {
   id: string;
   name: string;
-  email?: string;
+  email: string;
   phoneAnatel: string;
   staffType: "INTERNA" | "EXTERNA_TERCEIRO";
   specialty: string;
   companyName?: string;
   dailyRate: number;
-  status?: "ATIVO" | "INATIVO";
-  passwordChangedAtIso?: string;
+  status: "ATIVO" | "INATIVO";
+  passwordChangedAtIso: string;
 }
 
 export interface ClientRecord {
@@ -32,14 +37,14 @@ export interface ClientRecord {
   email: string;
   phoneAnatel: string;
   cpfCnpj?: string;
-  status?: "ATIVO" | "INATIVO";
-  passwordChangedAtIso?: string;
+  status: "ATIVO" | "INATIVO";
+  passwordChangedAtIso: string;
 }
 
 export interface EventRecord {
   id: string;
   title: string;
-  eventType: string; // Aceita categoria em texto livre (Card #13)
+  eventType: string;
   honoreeName: string;
   clientName: string;
   clientEmail?: string;
@@ -50,6 +55,7 @@ export interface EventRecord {
   status: "PENDENTE" | "CONFIRMADO" | "CANCELADO" | "CONCLUIDO";
   googleCalendarEventId?: string;
   supportTeam: string[];
+  confirmedStaff?: string[]; // Guarda quem da equipe já confirmou presença
   notes?: string;
 }
 
@@ -68,6 +74,7 @@ export const DEFAULT_ADMIN_USER: UserAccount = {
   phoneAnatel: "(11) 99999-9999",
   password: "DaHora@2026",
   role: "ADM",
+  specialty: "Gestão Geral Familiar",
   status: "ATIVO",
   passwordChangedAtIso: "2026-11-17T00:00:00-03:00",
 };
@@ -129,7 +136,6 @@ export function saveStaffToStorage(staff: StaffMember[]) {
   }
 }
 
-// Gerenciamento da Sessão do Usuário Logado (Card #4)
 export function setCurrentUserSession(user: UserAccount | null) {
   if (typeof window !== "undefined") {
     if (user) {
@@ -151,7 +157,6 @@ export function getCurrentUserSession(): UserAccount | null {
   }
 }
 
-// Gera Link Oficial de Agendamento no Google Calendar (Card #19)
 export function generateGoogleCalendarUrl(ev: EventRecord): string {
   const cleanDate = ev.eventDate.replace(/-/g, "");
   const cleanStart = (ev.startTime || "12:00").replace(":", "") + "00";
@@ -179,4 +184,4 @@ export function resetDatabaseToAdminOnly() {
     clients: [] as ClientRecord[],
     staff: [] as StaffMember[],
   };
-}
+} 
