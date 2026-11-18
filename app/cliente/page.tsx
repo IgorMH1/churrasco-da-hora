@@ -10,7 +10,7 @@ import {
   getNowGmt3,
 } from "../../lib/services/rbacAndTime";
 import {
-  loadInitialData,
+  fetchAllFromSupabase,
   saveEventsToStorage,
   saveUsersToStorage,
   saveClientsToStorage,
@@ -26,14 +26,15 @@ export default function ClientPortalPage() {
   const [activeTab, setActiveTab] = useState<"MEUS_EVENTOS" | "MINHA_CONTA">("MEUS_EVENTOS");
   const [feedback, setFeedback] = useState<{ type: "success" | "error"; text: string } | null>(null);
   const [daysRemaining, setDaysRemaining] = useState<number>(90);
+  const [isLoadingCloud, setIsLoadingCloud] = useState<boolean>(true);
 
-  // Dados do Banco e Sessão Real do Usuário (Card #4)
+  // Dados sincronizados com o Supabase
   const [currentUser, setCurrentUser] = useState<UserAccount | null>(null);
   const [allUsers, setAllUsers] = useState<UserAccount[]>([]);
   const [allClients, setAllClients] = useState<ClientRecord[]>([]);
   const [allEvents, setAllEvents] = useState<EventRecord[]>([]);
 
-  // Estados do Modal Interativo de Evento (Card #6)
+  // Estados do Modal Interativo de Evento
   const [selectedEvent, setSelectedEvent] = useState<EventRecord | null>(null);
   const [isEditingEvent, setIsEditingEvent] = useState<boolean>(false);
   const [editTitle, setEditTitle] = useState("");
@@ -61,31 +62,47 @@ export default function ClientPortalPage() {
   const [confirmPassword, setConfirmPassword] = useState("");
 
   useEffect(() => {
-    const data = loadInitialData();
-    setAllUsers(data.users);
-    setAllClients(data.clients);
-    setAllEvents(data.events);
-
     const now = getNowGmt3();
     setEventDate(now.dateStr);
 
     const sessionUser = getCurrentUserSession();
-    if (sessionUser) {
-      setCurrentUser(sessionUser);
-      setMyName(sessionUser.name);
-      setMyEmail(sessionUser.email);
-      setMyPhone(sessionUser.phoneAnatel);
-      setMyCpfCnpj(sessionUser.cpfCnpj || "");
-      setDaysRemaining(getPasswordDaysRemaining(sessionUser.passwordChangedAtIso));
-    } else {
+    if (!sessionUser) {
       window.location.href = "/";
+      return;
     }
+
+    setCurrentUser(sessionUser);
+    setMyName(sessionUser.name);
+    setMyEmail(sessionUser.email);
+    setMyPhone(sessionUser.phoneAnatel);
+    setMyCpfCnpj(sessionUser.cpfCnpj || "");
+    setDaysRemaining(getPasswordDaysRemaining(sessionUser.passwordChangedAtIso));
+
+    fetchAllFromSupabase().then((cloudData) => {
+      setAllUsers(cloudData.users);
+      setAllClients(cloudData.clients);
+      setAllEvents(cloudData.events);
+
+      // Atualiza os dados da sessão com a versão mais recente gravada no Supabase
+      const freshUser = cloudData.users.find(
+        (u) => u.id === sessionUser.id || u.email.toLowerCase() === sessionUser.email.toLowerCase()
+      );
+      if (freshUser) {
+        setCurrentUser(freshUser);
+        setCurrentUserSession(freshUser);
+        setMyName(freshUser.name);
+        setMyEmail(freshUser.email);
+        setMyPhone(freshUser.phoneAnatel);
+        setMyCpfCnpj(freshUser.cpfCnpj || "");
+        setDaysRemaining(getPasswordDaysRemaining(freshUser.passwordChangedAtIso));
+      }
+      setIsLoadingCloud(false);
+    });
   }, []);
 
   const phoneCheck = validateAnatelPhone(myPhone);
   const pwCheck = validatePasswordRbac(newPassword);
 
-  // Filtra os eventos pertencentes ao cliente logado (ou todos caso o ADM esteja visualizando)
   const myEvents = allEvents.filter((ev) => {
     if (!currentUser) return false;
     if (currentUser.role === "ADM") return true;
@@ -111,7 +128,7 @@ export default function ClientPortalPage() {
     return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase();
   };
 
-  // Criar Novo Evento vinculado ao cliente logado
+  // Criar Novo Evento e gravar na tabela `events` do Supabase
   const handleCreateNewEvent = (e: React.FormEvent) => {
     e.preventDefault();
     if (!honoreeName.trim()) {
@@ -152,11 +169,10 @@ export default function ClientPortalPage() {
     setHonoreeName("");
     setFeedback({
       type: "success",
-      text: "✓ Sua solicitação chegou! Clique no card do evento ao lado para ver detalhes ou adicionar ao Google Calendar.",
+      text: "✓ Solicitação salva no Supabase! Clique no card do evento ao lado para ver detalhes ou adicionar ao Google Calendar.",
     });
   };
 
-  // Abrir Modal Interativo ao clicar no Card (Card #6)
   const handleOpenEventModal = (ev: EventRecord) => {
     setSelectedEvent(ev);
     setIsEditingEvent(false);
@@ -168,7 +184,7 @@ export default function ClientPortalPage() {
     setEditEnd(ev.endTime);
   };
 
-  // Salvar Edição do Evento pelo Modal Interativo
+  // Salvar Edição do Evento no Supabase
   const handleSaveEventEdit = (e: React.FormEvent) => {
     e.preventDefault();
     if (!selectedEvent) return;
@@ -209,10 +225,10 @@ export default function ClientPortalPage() {
     saveEventsToStorage(updatedList);
     setSelectedEvent(updatedEv);
     setIsEditingEvent(false);
-    setFeedback({ type: "success", text: "✓ Dados do evento atualizados com sucesso!" });
+    setFeedback({ type: "success", text: "✓ Dados do evento atualizados no Supabase!" });
   };
 
-  // Cancelar Evento pelo Modal Interativo
+  // Cancelar Evento no Supabase
   const handleCancelEventFromModal = (id: string) => {
     const updatedList = allEvents.map((ev) =>
       ev.id === id ? { ...ev, status: "CANCELADO" as const } : ev
@@ -220,10 +236,10 @@ export default function ClientPortalPage() {
     setAllEvents(updatedList);
     saveEventsToStorage(updatedList);
     setSelectedEvent((prev) => (prev ? { ...prev, status: "CANCELADO" } : null));
-    setFeedback({ type: "success", text: "Solicitação de evento cancelada." });
+    setFeedback({ type: "success", text: "Solicitação de evento cancelada no Supabase." });
   };
 
-  // Salvar Dados de "Minha Conta" no Banco Real
+  // Salvar Dados de "Minha Conta" na tabela `users` do Supabase
   const handleSaveProfile = (e: React.FormEvent) => {
     e.preventDefault();
     if (!currentUser) return;
@@ -235,19 +251,29 @@ export default function ClientPortalPage() {
     const formattedPhone = phoneCheck.formatted || myPhone;
     const updatedUser: UserAccount = {
       ...currentUser,
-      name: myName,
+      name: myName.trim(),
       email: myEmail.trim().toLowerCase(),
       phoneAnatel: formattedPhone,
       cpfCnpj: myCpfCnpj,
     };
 
-    const updatedUsers = allUsers.map((u) => (u.id === currentUser.id ? updatedUser : u));
+    const existsInList = allUsers.some((u) => u.id === currentUser.id);
+    const updatedUsers = existsInList
+      ? allUsers.map((u) => (u.id === currentUser.id ? updatedUser : u))
+      : [updatedUser, ...allUsers];
+
     setAllUsers(updatedUsers);
     saveUsersToStorage(updatedUsers);
 
     const updatedClients = allClients.map((c) =>
       c.id === currentUser.id || c.email.toLowerCase() === currentUser.email.toLowerCase()
-        ? { ...c, name: myName, email: myEmail.trim().toLowerCase(), phoneAnatel: formattedPhone, cpfCnpj: myCpfCnpj }
+        ? {
+            ...c,
+            name: myName.trim(),
+            email: myEmail.trim().toLowerCase(),
+            phoneAnatel: formattedPhone,
+            cpfCnpj: myCpfCnpj,
+          }
         : c
     );
     setAllClients(updatedClients);
@@ -257,11 +283,11 @@ export default function ClientPortalPage() {
     setCurrentUserSession(updatedUser);
     setFeedback({
       type: "success",
-      text: `✓ Seus dados foram atualizados com sucesso (${phoneCheck.regionUf})!`,
+      text: `✓ Seus dados foram salvos no Supabase (${phoneCheck.regionUf})!`,
     });
   };
 
-  // Atualizar Senha RBAC no Banco Real
+  // Atualizar Senha RBAC na tabela `users` do Supabase
   const handleUpdatePassword = (e: React.FormEvent) => {
     e.preventDefault();
     if (!currentUser) return;
@@ -271,7 +297,10 @@ export default function ClientPortalPage() {
       return;
     }
     if (!pwCheck.isValid) {
-      setFeedback({ type: "error", text: "A nova senha precisa cumprir os 4 critérios de segurança." });
+      setFeedback({
+        type: "error",
+        text: "A nova senha precisa cumprir os critérios RBAC (mín. 8 caracteres e caractere especial).",
+      });
       return;
     }
     if (newPassword !== confirmPassword) {
@@ -286,7 +315,11 @@ export default function ClientPortalPage() {
       passwordChangedAtIso: nowIso,
     };
 
-    const updatedUsers = allUsers.map((u) => (u.id === currentUser.id ? updatedUser : u));
+    const existsInList = allUsers.some((u) => u.id === currentUser.id);
+    const updatedUsers = existsInList
+      ? allUsers.map((u) => (u.id === currentUser.id ? updatedUser : u))
+      : [updatedUser, ...allUsers];
+
     setAllUsers(updatedUsers);
     saveUsersToStorage(updatedUsers);
 
@@ -298,13 +331,12 @@ export default function ClientPortalPage() {
     setDaysRemaining(90);
     setFeedback({
       type: "success",
-      text: "✓ Senha atualizada com sucesso! Novo ciclo de validade: 90 dias.",
+      text: "✓ Senha atualizada no Supabase! Novo ciclo de validade: 90 dias.",
     });
   };
 
   return (
     <div className="min-h-screen bg-[#0A0E17] text-slate-100 flex flex-col lg:flex-row font-sans">
-      {/* BARRA LATERAL ESQUERDA DO CLIENTE */}
       <aside className="w-full lg:w-64 bg-[#0D121E] border-b lg:border-b-0 lg:border-r border-slate-800/80 flex flex-col justify-between p-5 shrink-0">
         <div className="space-y-7">
           <div className="flex items-center gap-3 px-1">
@@ -349,10 +381,11 @@ export default function ClientPortalPage() {
         <div className="hidden lg:flex flex-col gap-4 pt-6">
           <div className="bg-[#111726] border border-slate-800/90 rounded-2xl p-3.5 space-y-1">
             <span className="text-[11px] font-semibold text-emerald-400 flex items-center gap-1.5">
-              <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" /> ✓ Conectado
+              <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />{" "}
+              {isLoadingCloud ? "Sincronizando..." : "✓ Supabase & Google Calendar"}
             </span>
-            <p className="text-xs font-bold text-white">Google Calendar</p>
-            <p className="text-[11px] text-slate-400">Clique em qualquer evento para abrir na agenda.</p>
+            <p className="text-xs font-bold text-white">Nuvem Ativa</p>
+            <p className="text-[11px] text-slate-400">Seus eventos ficam salvos no banco externo.</p>
           </div>
 
           <div className="border-t border-slate-800/80 pt-4 space-y-3">
@@ -362,9 +395,7 @@ export default function ClientPortalPage() {
               </div>
               <div className="leading-tight truncate">
                 <p className="text-xs font-bold text-white truncate">{myName || "Cliente"}</p>
-                <p className="text-[11px] text-slate-400 truncate">
-                  {currentUser?.id || "Conta do cliente"}
-                </p>
+                <p className="text-[11px] text-slate-400 truncate">{currentUser?.id || "Conta do cliente"}</p>
               </div>
             </div>
             <div className="flex items-center justify-between text-xs pt-1">
@@ -388,12 +419,11 @@ export default function ClientPortalPage() {
         </div>
       </aside>
 
-      {/* CONTEÚDO PRINCIPAL DO CLIENTE */}
       <div className="flex-1 flex flex-col min-w-0">
         <header className="border-b border-slate-800/80 px-6 py-5 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
           <div>
             <p className="text-[10px] font-bold tracking-[0.18em] text-amber-500 uppercase">
-              {activeTab === "MEUS_EVENTOS" ? "ÁREA DO CLIENTE" : `CLIENTE · ${myName.toUpperCase()}`}
+              {activeTab === "MEUS_EVENTOS" ? "ÁREA DO CLIENTE · SUPABASE" : `CLIENTE · ${myName.toUpperCase()}`}
             </p>
             <h1 className="text-2xl sm:text-3xl font-extrabold text-white mt-0.5">
               {activeTab === "MEUS_EVENTOS" ? `Olá, ${myName.split(" ")[0] || "Cliente"}!` : "Minha conta"}
@@ -401,7 +431,7 @@ export default function ClientPortalPage() {
             <p className="text-xs text-slate-400 mt-0.5">
               {activeTab === "MEUS_EVENTOS"
                 ? "Clique em qualquer card de evento para ver detalhes, editar ou enviar ao Google Calendar."
-                : "Seus dados atualizados, sua conta protegida."}
+                : "Seus dados atualizados e sincronizados no Supabase."}
             </p>
           </div>
 
@@ -430,7 +460,6 @@ export default function ClientPortalPage() {
         <main className="p-6 space-y-6 flex-1">
           {activeTab === "MEUS_EVENTOS" && (
             <div className="space-y-6">
-              {/* HERO CARD INTERATIVO DO PRÓXIMO ENCONTRO (Card #6) */}
               {nextEvent && (
                 <div
                   onClick={() => handleOpenEventModal(nextEvent)}
@@ -463,7 +492,6 @@ export default function ClientPortalPage() {
                 </div>
               )}
 
-              {/* DUAS COLUNAS: + AGENDAR NOVO EVENTO + MEUS EVENTOS MARCADOS INTERATIVOS */}
               <div className="grid grid-cols-1 xl:grid-cols-12 gap-6 items-start">
                 <form
                   onSubmit={handleCreateNewEvent}
@@ -476,7 +504,7 @@ export default function ClientPortalPage() {
 
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
                     <div>
-                      <label className="block text-xs font-medium text-slate-300 mb-1.5">Categoria</label>
+                      <label className="block text-xs font-medium text-slate-300 mb-1.5">Categoria (Texto livre)</label>
                       <input
                         type="text"
                         required
@@ -556,10 +584,6 @@ export default function ClientPortalPage() {
                     </div>
                   )}
 
-                  <p className="text-[11px] text-slate-400">
-                    O espaço fica reservado por mais 1h para limpeza e preparação após o término do evento.
-                  </p>
-
                   <button
                     type="submit"
                     className="w-full bg-[#F59E0B] hover:bg-amber-400 text-slate-950 font-bold py-3.5 rounded-2xl text-xs transition"
@@ -568,7 +592,6 @@ export default function ClientPortalPage() {
                   </button>
                 </form>
 
-                {/* LISTA DE MEUS EVENTOS MARCADOS COM CARDS INTERATIVOS (Card #6) */}
                 <div className="xl:col-span-6 bg-[#111726] border border-slate-800/90 rounded-3xl p-6 space-y-4">
                   <div className="flex justify-between items-center">
                     <div>
@@ -580,7 +603,7 @@ export default function ClientPortalPage() {
 
                   {myEvents.length === 0 ? (
                     <p className="text-xs text-slate-500 py-8 text-center">
-                      Você ainda não possui eventos marcados. Use o formulário ao lado para solicitar sua primeira reserva!
+                      Você ainda não possui eventos marcados no Supabase. Use o formulário ao lado para reservar!
                     </p>
                   ) : (
                     <div className="space-y-3">
@@ -629,7 +652,6 @@ export default function ClientPortalPage() {
             </div>
           )}
 
-          {/* ABA 2: MINHA CONTA */}
           {activeTab === "MINHA_CONTA" && (
             <div className="grid grid-cols-1 xl:grid-cols-12 gap-6 items-start">
               <form
@@ -639,7 +661,7 @@ export default function ClientPortalPage() {
                 <div className="flex items-center justify-between">
                   <div>
                     <h2 className="text-lg font-extrabold text-white">Seus dados</h2>
-                    <p className="text-xs text-slate-400">Mantenha seus contatos sempre atualizados.</p>
+                    <p className="text-xs text-slate-400">Sincronizados em tempo real no Supabase.</p>
                   </div>
                   <span className="text-xs font-mono bg-[#0A0E17] border border-slate-800 px-3 py-1 rounded-lg text-amber-400">
                     ID: {currentUser?.id}
@@ -699,7 +721,7 @@ export default function ClientPortalPage() {
                   type="submit"
                   className="w-full bg-[#F59E0B] hover:bg-amber-400 text-slate-950 font-bold py-3.5 rounded-2xl text-xs transition"
                 >
-                  Salvar alterações
+                  Salvar alterações no Supabase
                 </button>
               </form>
 
@@ -708,18 +730,8 @@ export default function ClientPortalPage() {
                 className="xl:col-span-6 bg-[#111726] border border-slate-800/90 rounded-3xl p-6 space-y-4"
               >
                 <div>
-                  <h2 className="text-lg font-extrabold text-white">Segurança da senha</h2>
-                  <p className="text-xs text-slate-400">Uma senha forte protege todos os seus encontros.</p>
-                </div>
-
-                <div className="p-4 rounded-2xl bg-emerald-950/40 border border-emerald-500/30 flex items-center justify-between">
-                  <div>
-                    <p className="text-xs font-bold text-emerald-400">🔒 Sua senha está em dia</p>
-                    <p className="text-[11px] text-slate-300 mt-0.5">
-                      Faltam {daysRemaining} de 90 dias para expirar
-                    </p>
-                  </div>
-                  <span className="text-[11px] text-slate-400">Ciclo RBAC</span>
+                  <h2 className="text-lg font-extrabold text-white">Segurança da senha (RBAC)</h2>
+                  <p className="text-xs text-slate-400">Mínimo de 8 caracteres e 1 caractere especial.</p>
                 </div>
 
                 <div>
@@ -747,17 +759,17 @@ export default function ClientPortalPage() {
                 </div>
 
                 <div className="grid grid-cols-2 gap-2 text-xs bg-[#0A0E17] border border-slate-800 p-3.5 rounded-2xl">
-                  <span className={pwCheck.minLength ? "text-emerald-400" : "text-slate-500"}>
+                  <span className={pwCheck.minLength ? "text-emerald-400 font-bold" : "text-slate-500"}>
                     ✓ Mínimo de 8 caracteres
+                  </span>
+                  <span className={pwCheck.hasSpecial ? "text-emerald-400 font-bold" : "text-slate-500"}>
+                    ✓ 1 caractere especial
                   </span>
                   <span className={pwCheck.hasUpper && pwCheck.hasLower ? "text-emerald-400" : "text-slate-500"}>
                     ✓ Maiúscula e minúscula
                   </span>
                   <span className={pwCheck.hasNumber ? "text-emerald-400" : "text-slate-500"}>
                     ✓ Pelo menos 1 número
-                  </span>
-                  <span className={pwCheck.hasSpecial ? "text-emerald-400" : "text-slate-500"}>
-                    ✓ 1 caractere especial
                   </span>
                 </div>
 
@@ -777,7 +789,7 @@ export default function ClientPortalPage() {
                   type="submit"
                   className="w-full bg-[#192236] hover:bg-slate-800 text-amber-400 border border-amber-500/30 font-bold py-3.5 rounded-2xl text-xs transition"
                 >
-                  Atualizar minha senha
+                  Atualizar minha senha no Supabase
                 </button>
               </form>
             </div>
@@ -785,7 +797,6 @@ export default function ClientPortalPage() {
         </main>
       </div>
 
-      {/* MODAL INTERATIVO DO EVENTO (Card #6 e Card #19 do Trello) */}
       {selectedEvent && (
         <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-sm flex items-center justify-center p-4">
           <div className="bg-[#111726] border border-slate-700 rounded-3xl max-w-lg w-full p-6 space-y-5 shadow-2xl">
@@ -933,7 +944,7 @@ export default function ClientPortalPage() {
                     type="submit"
                     className="flex-1 bg-[#F59E0B] hover:bg-amber-400 text-slate-950 font-bold py-2.5 rounded-xl"
                   >
-                    Salvar alterações
+                    Salvar no Supabase
                   </button>
                   <button
                     type="button"
