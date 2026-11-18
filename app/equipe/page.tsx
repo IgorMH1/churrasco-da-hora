@@ -4,7 +4,7 @@ import React, { useState, useEffect } from "react";
 import { applyAnatelPhoneMask, validateAnatelPhone } from "../../lib/services/anatel";
 import { validatePasswordRbac, getPasswordDaysRemaining } from "../../lib/services/rbacAndTime";
 import {
-  loadInitialData,
+  fetchAllFromSupabase,
   saveEventsToStorage,
   saveUsersToStorage,
   saveStaffToStorage,
@@ -13,11 +13,14 @@ import {
   generateGoogleCalendarUrl,
   UserAccount,
   EventRecord,
+  StaffMember,
 } from "../../lib/services/storage";
 
 export default function StaffPortalPage() {
   const [activeTab, setActiveTab] = useState<"ESCALA" | "CONTA">("ESCALA");
   const [currentUser, setCurrentUser] = useState<UserAccount | null>(null);
+  const [allUsers, setAllUsers] = useState<UserAccount[]>([]);
+  const [allStaff, setAllStaff] = useState<StaffMember[]>([]);
   const [events, setEvents] = useState<EventRecord[]>([]);
   const [daysRemaining, setDaysRemaining] = useState<number>(90);
   const [feedback, setFeedback] = useState<{ type: "success" | "error"; text: string } | null>(null);
@@ -35,8 +38,21 @@ export default function StaffPortalPage() {
     setMyPhone(session.phoneAnatel);
     setDaysRemaining(getPasswordDaysRemaining(session.passwordChangedAtIso));
 
-    const data = loadInitialData();
-    setEvents(data.events);
+    fetchAllFromSupabase().then((cloudData) => {
+      setAllUsers(cloudData.users);
+      setAllStaff(cloudData.staff);
+      setEvents(cloudData.events);
+
+      const freshUser = cloudData.users.find(
+        (u) => u.id === session.id || u.email.toLowerCase() === session.email.toLowerCase()
+      );
+      if (freshUser) {
+        setCurrentUser(freshUser);
+        setCurrentUserSession(freshUser);
+        setMyPhone(freshUser.phoneAnatel);
+        setDaysRemaining(getPasswordDaysRemaining(freshUser.passwordChangedAtIso));
+      }
+    });
   }, []);
 
   const phoneCheck = validateAnatelPhone(myPhone);
@@ -44,7 +60,6 @@ export default function StaffPortalPage() {
 
   const isInternal = currentUser?.role === "EQUIPE_INTERNA";
 
-  // Equipe Interna vê todos os eventos ativos para apoiar a organização; Equipe Externa vê onde está escalada
   const assignedEvents = events.filter((ev) => {
     if (ev.status === "CANCELADO") return false;
     if (isInternal) return true;
@@ -53,6 +68,7 @@ export default function StaffPortalPage() {
     );
   });
 
+  // Confirmar presença na escala e gravar na tabela `events` do Supabase
   const handleConfirmPresence = (eventId: string) => {
     if (!currentUser) return;
     const updated = events.map((ev) => {
@@ -63,9 +79,13 @@ export default function StaffPortalPage() {
     });
     setEvents(updated);
     saveEventsToStorage(updated);
-    setFeedback({ type: "success", text: "✓ Sua presença foi confirmada na escala deste evento!" });
+    setFeedback({
+      type: "success",
+      text: "✓ Sua presença foi confirmada e salva no Supabase para este evento!",
+    });
   };
 
+  // Atualizar Telefone ANATEL e Senha RBAC na tabela `users` do Supabase
   const handleUpdateAccount = (e: React.FormEvent) => {
     e.preventDefault();
     if (!currentUser) return;
@@ -89,21 +109,26 @@ export default function StaffPortalPage() {
       passwordChangedAtIso: nowIso,
     };
 
-    const data = loadInitialData();
-    const updatedUsers = data.users.map((u) => (u.id === currentUser.id ? updatedUser : u));
+    const existsInUsers = allUsers.some((u) => u.id === currentUser.id);
+    const updatedUsers = existsInUsers
+      ? allUsers.map((u) => (u.id === currentUser.id ? updatedUser : u))
+      : [updatedUser, ...allUsers];
+
+    setAllUsers(updatedUsers);
     saveUsersToStorage(updatedUsers);
 
-    const updatedStaff = data.staff.map((s) =>
+    const updatedStaff = allStaff.map((s) =>
       s.id === currentUser.id
         ? { ...s, phoneAnatel: updatedUser.phoneAnatel, passwordChangedAtIso: nowIso }
         : s
     );
+    setAllStaff(updatedStaff);
     saveStaffToStorage(updatedStaff);
 
     setCurrentUser(updatedUser);
     setCurrentUserSession(updatedUser);
     setNewPassword("");
-    setFeedback({ type: "success", text: "✓ Dados e senha RBAC atualizados com sucesso!" });
+    setFeedback({ type: "success", text: "✓ Dados e senha RBAC atualizados no Supabase!" });
   };
 
   return (
@@ -172,7 +197,9 @@ export default function StaffPortalPage() {
         <header className="border-b border-slate-800/80 px-6 py-5 flex items-center justify-between">
           <div>
             <span className="text-[10px] font-bold uppercase tracking-wider text-amber-500">
-              {isInternal ? "APOIO INTERNO · FAMÍLIA DA HORA" : `PRESTADOR PARCEIRO · ${currentUser?.specialty}`}
+              {isInternal
+                ? "APOIO INTERNO · SUPABASE CLOUD"
+                : `PRESTADOR PARCEIRO · ${currentUser?.specialty || "EQUIPE EXTERNA"}`}
             </span>
             <h1 className="text-2xl font-extrabold text-white mt-0.5">
               Olá, {currentUser?.name.split(" ")[0]}!
@@ -184,7 +211,13 @@ export default function StaffPortalPage() {
         </header>
 
         {feedback && (
-          <div className="mx-6 mt-5 p-3.5 rounded-xl bg-emerald-950/60 border border-emerald-500/40 text-emerald-200 text-xs flex justify-between">
+          <div
+            className={`mx-6 mt-5 p-3.5 rounded-xl text-xs flex justify-between border ${
+              feedback.type === "success"
+                ? "bg-emerald-950/60 border-emerald-500/40 text-emerald-200"
+                : "bg-rose-950/60 border-rose-500/40 text-rose-200"
+            }`}
+          >
             <span>{feedback.text}</span>
             <button onClick={() => setFeedback(null)}>✕</button>
           </div>
@@ -277,7 +310,7 @@ export default function StaffPortalPage() {
                 type="submit"
                 className="w-full bg-[#F59E0B] text-slate-950 font-bold py-3 rounded-xl"
               >
-                Salvar alterações
+                Salvar alterações no Supabase
               </button>
             </form>
           )}
