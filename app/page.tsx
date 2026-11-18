@@ -30,7 +30,7 @@ export default function LoginAndPublicPortal() {
   const [allEvents, setAllEvents] = useState<EventRecord[]>([]);
   const [allClients, setAllClients] = useState<ClientRecord[]>([]);
 
-  // Estados do Login (Card #4)
+  // Estados do Login
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
@@ -38,14 +38,14 @@ export default function LoginAndPublicPortal() {
   const [lockedUntil, setLockedUntil] = useState<number | null>(null);
   const [loginFeedback, setLoginFeedback] = useState<{ type: "error" | "success" | "warn"; text: string } | null>(null);
 
-  // Estados do "Esqueci minha senha" funcional em 2 etapas (Card #20)
+  // Estados do "Esqueci minha senha"
   const [recoveryEmail, setRecoveryEmail] = useState("");
   const [generatedToken, setGeneratedToken] = useState<string | null>(null);
   const [typedToken, setTypedToken] = useState("");
   const [newRecoveryPassword, setNewRecoveryPassword] = useState("");
   const [recoveryFeedback, setRecoveryFeedback] = useState<{ type: "error" | "success"; text: string } | null>(null);
 
-  // Estados do "Agende seu evento" (Card #4)
+  // Estados do "Agende seu evento"
   const [clientName, setClientName] = useState("");
   const [clientEmail, setClientEmail] = useState("");
   const [clientPhone, setClientPhone] = useState("");
@@ -86,7 +86,7 @@ export default function LoginAndPublicPortal() {
     return `${String(nextH).padStart(2, "0")}:${String(m).padStart(2, "0")}`;
   };
 
-  // LOGIN REAL: Apenas autentica usuários já cadastrados no banco (Card #4)
+  // LOGIN UNIFICADO PARA OS 4 PERFIS (ADM, EQUIPE_INTERNA, EQUIPE_EXTERNA, CLIENTE)
   const handleLogin = (e: React.FormEvent) => {
     e.preventDefault();
     setLoginFeedback(null);
@@ -100,12 +100,14 @@ export default function LoginAndPublicPortal() {
       return;
     }
 
-    const foundUser = allUsers.find((u) => u.email.toLowerCase() === email.trim().toLowerCase());
+    // Recarrega do localStorage no momento do clique para garantir que qualquer conta recém-criada pelo ADM seja lida
+    const latestData = loadInitialData();
+    const foundUser = latestData.users.find((u) => u.email.toLowerCase() === email.trim().toLowerCase());
 
     if (!foundUser) {
       setLoginFeedback({
         type: "error",
-        text: "Usuário não encontrado no banco de dados. Caso seja seu primeiro acesso, use a aba 'Agende seu evento'.",
+        text: "E-mail não encontrado no sistema. Cadastre-se em 'Agende seu evento' ou peça ao ADM para cadastrar seu perfil.",
       });
       return;
     }
@@ -113,7 +115,7 @@ export default function LoginAndPublicPortal() {
     if (foundUser.status === "INATIVO") {
       setLoginFeedback({
         type: "error",
-        text: "Esta conta está inativa. Entre em contato com a administração do espaço.",
+        text: "Esta conta está marcada como INATIVA pelo Administrador.",
       });
       return;
     }
@@ -132,7 +134,7 @@ export default function LoginAndPublicPortal() {
       } else {
         setLoginFeedback({
           type: "error",
-          text: `Senha incorreta. Tentativa ${newFailures} de ${MAX_LOGIN_ATTEMPTS} · Após 5 erros, bloqueio por 30 min.`,
+          text: `Senha incorreta ou fora do padrão RBAC. Tentativa ${newFailures} de ${MAX_LOGIN_ATTEMPTS}.`,
         });
       }
       return;
@@ -151,22 +153,38 @@ export default function LoginAndPublicPortal() {
     setLockedUntil(null);
     setCurrentUserSession(foundUser);
 
+    const targetRoute =
+      foundUser.role === "ADM"
+        ? "/admin"
+        : foundUser.role === "CLIENTE"
+        ? "/cliente"
+        : "/equipe";
+
+    const roleLabel =
+      foundUser.role === "ADM"
+        ? "Administrador"
+        : foundUser.role === "EQUIPE_INTERNA"
+        ? "Equipe Interna"
+        : foundUser.role === "EQUIPE_EXTERNA"
+        ? "Equipe Externa"
+        : "Cliente";
+
     setLoginFeedback({
       type: "success",
-      text: `Acesso confirmado! Redirecionando para ${foundUser.role === "ADM" ? "Painel da Família" : "Área do Cliente"}...`,
+      text: `Bem-vindo(a), ${foundUser.name} (${roleLabel})! Redirecionando...`,
     });
 
     setTimeout(() => {
-      window.location.href = foundUser.role === "ADM" ? "/admin" : "/cliente";
-    }, 800);
+      window.location.href = targetRoute;
+    }, 700);
   };
 
-  // RECUPERAÇÃO DE SENHA FUNCIONAL (Card #20)
   const handleSendRecoveryEmail = (e: React.FormEvent) => {
     e.preventDefault();
     setRecoveryFeedback(null);
 
-    const foundUser = allUsers.find((u) => u.email.toLowerCase() === recoveryEmail.trim().toLowerCase());
+    const latestUsers = loadInitialData().users;
+    const foundUser = latestUsers.find((u) => u.email.toLowerCase() === recoveryEmail.trim().toLowerCase());
     if (!foundUser) {
       setRecoveryFeedback({
         type: "error",
@@ -179,7 +197,7 @@ export default function LoginAndPublicPortal() {
     setGeneratedToken(token);
     setRecoveryFeedback({
       type: "success",
-      text: `E-mail de recuperação enviado para ${foundUser.email}! Código temporário (15 min): ${token}`,
+      text: `E-mail enviado para ${foundUser.email}! Código temporário (15 min): ${token}`,
     });
   };
 
@@ -192,13 +210,14 @@ export default function LoginAndPublicPortal() {
     if (!pwCheck.isValid) {
       setRecoveryFeedback({
         type: "error",
-        text: "A nova senha deve cumprir todos os 4 requisitos de segurança.",
+        text: "A nova senha deve ter no mínimo 8 caracteres e incluir caractere especial.",
       });
       return;
     }
 
     const nowIso = new Date().toISOString();
-    const updatedUsers = allUsers.map((u) =>
+    const latestUsers = loadInitialData().users;
+    const updatedUsers = latestUsers.map((u) =>
       u.email.toLowerCase() === recoveryEmail.trim().toLowerCase()
         ? { ...u, password: newRecoveryPassword, passwordChangedAtIso: nowIso }
         : u
@@ -211,11 +230,10 @@ export default function LoginAndPublicPortal() {
     setNewRecoveryPassword("");
     setRecoveryFeedback({
       type: "success",
-      text: "✓ Senha redefinida com sucesso! Você já pode acessar na aba Login.",
+      text: "✓ Senha redefinida com sucesso! Você já pode entrar na aba Login.",
     });
   };
 
-  // AGENDE SEU EVENTO: Cria o usuário no banco, inicia sessão e redireciona (Card #4)
   const handlePreSchedule = (e: React.FormEvent) => {
     e.preventDefault();
     setScheduleFeedback(null);
@@ -227,7 +245,7 @@ export default function LoginAndPublicPortal() {
     if (!pwCheck.isValid) {
       setScheduleFeedback({
         type: "error",
-        text: "Crie uma senha forte seguindo os 4 critérios de segurança.",
+        text: "A senha precisa cumprir os requisitos RBAC (mínimo de 8 caracteres e caractere especial).",
       });
       return;
     }
@@ -247,8 +265,9 @@ export default function LoginAndPublicPortal() {
       return;
     }
 
+    const latest = loadInitialData();
     const normalizedEmail = clientEmail.trim().toLowerCase();
-    const existingUser = allUsers.find((u) => u.email.toLowerCase() === normalizedEmail);
+    const existingUser = latest.users.find((u) => u.email.toLowerCase() === normalizedEmail);
     const nowIso = new Date().toISOString();
     const shortId = `CLI-${Math.floor(1000 + Math.random() * 9000)}`;
 
@@ -267,7 +286,7 @@ export default function LoginAndPublicPortal() {
         status: "ATIVO",
         passwordChangedAtIso: nowIso,
       };
-      const updatedUsers = [...allUsers, loggedUser];
+      const updatedUsers = [...latest.users, loggedUser];
       setAllUsers(updatedUsers);
       saveUsersToStorage(updatedUsers);
 
@@ -279,7 +298,7 @@ export default function LoginAndPublicPortal() {
         status: "ATIVO",
         passwordChangedAtIso: nowIso,
       };
-      const updatedClients = [...allClients, newClient];
+      const updatedClients = [...latest.clients, newClient];
       setAllClients(updatedClients);
       saveClientsToStorage(updatedClients);
     }
@@ -298,11 +317,10 @@ export default function LoginAndPublicPortal() {
       status: "PENDENTE",
       supportTeam: ["A definir pelo ADM"],
     };
-    const updatedEvents = [newEvent, ...allEvents];
+    const updatedEvents = [newEvent, ...latest.events];
     setAllEvents(updatedEvents);
     saveEventsToStorage(updatedEvents);
 
-    // Salva a sessão do cliente recém-criado para abrir a conta dele
     setCurrentUserSession(loggedUser);
 
     setScheduleFeedback({
@@ -312,12 +330,11 @@ export default function LoginAndPublicPortal() {
 
     setTimeout(() => {
       window.location.href = "/cliente";
-    }, 1000);
+    }, 900);
   };
 
   return (
     <div className="min-h-screen bg-[#0A0E17] text-slate-100 flex flex-col justify-between font-sans selection:bg-amber-500 selection:text-slate-950">
-      {/* BARRA SUPERIOR SEM O RELÓGIO GMT-3 (Card #3 do Trello) */}
       <header className="w-full border-b border-slate-800/80 bg-[#0A0E17]/90 backdrop-blur-md">
         <div className="max-w-7xl mx-auto px-4 sm:px-8 h-20 flex items-center justify-between gap-4">
           <div className="flex items-center gap-3">
@@ -339,7 +356,6 @@ export default function LoginAndPublicPortal() {
       </header>
 
       <main className="max-w-7xl w-full mx-auto px-4 sm:px-8 py-8 lg:py-12 grid grid-cols-1 lg:grid-cols-12 gap-10 lg:gap-12 items-start">
-        {/* COLUNA ESQUERDA: STORYTELLING */}
         <section className="lg:col-span-6 space-y-8 lg:pt-4">
           <div className="inline-flex items-center gap-2 px-3.5 py-1.5 rounded-full bg-amber-500/10 border border-amber-500/30 text-amber-400 text-[11px] font-bold tracking-[0.14em] uppercase">
             <span className="w-1.5 h-1.5 rounded-full bg-amber-400" />
@@ -354,8 +370,7 @@ export default function LoginAndPublicPortal() {
                 Os melhores <span className="text-amber-500">encontros</span> começam aqui.
               </h1>
               <p className="text-base sm:text-lg text-slate-400 max-w-xl leading-relaxed">
-                Seu espaço para celebrar. Sua agenda sob controle. Organize cada detalhe e aproveite o que importa:
-                estar junto de quem faz a vida ser da hora.
+                Acesso unificado para Administradores, Equipe Interna, Equipe Externa e Clientes.
               </p>
             </div>
           )}
@@ -366,7 +381,7 @@ export default function LoginAndPublicPortal() {
                 Um novo acesso. Os mesmos <span className="text-amber-500">bons encontros.</span>
               </h1>
               <p className="text-base sm:text-lg text-slate-400 max-w-xl leading-relaxed">
-                Recupere sua conta com tranquilidade e volte a cuidar do que importa: reunir quem você gosta.
+                Recupere sua conta com tranquilidade e volte a cuidar do que importa.
               </p>
             </div>
           )}
@@ -382,80 +397,28 @@ export default function LoginAndPublicPortal() {
             </div>
           )}
 
-          {activeTab !== "AGENDE_EVENTO" ? (
-            <div className="grid grid-cols-3 gap-4 pt-2 border-t border-slate-800/80 max-w-lg">
-              <div>
-                <span className="text-xs font-bold text-amber-500">01</span>
-                <p className="text-sm font-semibold text-slate-200 mt-0.5">Escolha a data</p>
-              </div>
-              <div>
-                <span className="text-xs font-bold text-amber-500">02</span>
-                <p className="text-sm font-semibold text-slate-200 mt-0.5">Conte com a gente</p>
-              </div>
-              <div>
-                <span className="text-xs font-bold text-amber-500">03</span>
-                <p className="text-sm font-semibold text-slate-200 mt-0.5">É só celebrar</p>
-              </div>
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 pt-2 border-t border-slate-800/80 max-w-lg text-xs">
+            <div className="bg-[#111726] border border-slate-800 p-3 rounded-xl">
+              <span className="text-amber-400 font-bold block">ADM</span>
+              <span className="text-slate-400 text-[11px]">Gestão total</span>
             </div>
-          ) : (
-            <div className="space-y-4 pt-2 max-w-md">
-              <div className="flex items-start gap-3.5">
-                <span className="px-2.5 py-1 rounded-md bg-amber-500/15 border border-amber-500/30 text-amber-400 font-bold text-xs">
-                  01
-                </span>
-                <div>
-                  <p className="font-bold text-sm text-white">Conte sobre o evento</p>
-                  <p className="text-xs text-slate-400">Data, categoria e quem vai celebrar.</p>
-                </div>
-              </div>
-              <div className="flex items-start gap-3.5">
-                <span className="px-2.5 py-1 rounded-md bg-amber-500/15 border border-amber-500/30 text-amber-400 font-bold text-xs">
-                  02
-                </span>
-                <div>
-                  <p className="font-bold text-sm text-white">Envie sua solicitação</p>
-                  <p className="text-xs text-slate-400">Nossa família confirma os detalhes.</p>
-                </div>
-              </div>
-              <div className="flex items-start gap-3.5">
-                <span className="px-2.5 py-1 rounded-md bg-amber-500/15 border border-amber-500/30 text-amber-400 font-bold text-xs">
-                  03
-                </span>
-                <div>
-                  <p className="font-bold text-sm text-white">Pronto para reunir</p>
-                  <p className="text-xs text-slate-400">Acompanhe tudo na sua conta.</p>
-                </div>
-              </div>
+            <div className="bg-[#111726] border border-slate-800 p-3 rounded-xl">
+              <span className="text-purple-400 font-bold block">Eq. Interna</span>
+              <span className="text-slate-400 text-[11px]">Apoio fixo</span>
             </div>
-          )}
-
-          <div className="max-w-lg bg-[#111726]/90 border border-slate-800/90 rounded-2xl p-5 flex items-start gap-4">
-            <div className="w-10 h-10 rounded-xl bg-amber-500/15 border border-amber-500/30 flex items-center justify-center text-amber-400 shrink-0">
-              {activeTab === "ESQUECI_SENHA" ? "🛡️" : activeTab === "AGENDE_EVENTO" ? "✨" : "📅"}
+            <div className="bg-[#111726] border border-slate-800 p-3 rounded-xl">
+              <span className="text-emerald-400 font-bold block">Eq. Externa</span>
+              <span className="text-slate-400 text-[11px]">Terceirizados</span>
             </div>
-            <div className="space-y-1">
-              <h3 className="font-bold text-sm text-white">
-                {activeTab === "ESQUECI_SENHA"
-                  ? "Segurança em cada etapa"
-                  : activeTab === "AGENDE_EVENTO"
-                  ? "Tudo pronto para receber você"
-                  : "Da primeira reserva ao último abraço."}
-              </h3>
-              <p className="text-xs text-slate-400 leading-relaxed">
-                {activeTab === "ESQUECI_SENHA"
-                  ? "Link válido por 15 minutos. Proteção para sua família, suas informações e todos os seus eventos."
-                  : activeTab === "AGENDE_EVENTO"
-                  ? "Reservamos +1h entre eventos para limpeza e preparação. Esse cuidado é por nossa conta."
-                  : "Aniversários, festas em família, futebol e encontros corporativos. Tudo no mesmo lugar."}
-              </p>
+            <div className="bg-[#111726] border border-slate-800 p-3 rounded-xl">
+              <span className="text-sky-400 font-bold block">Clientes</span>
+              <span className="text-slate-400 text-[11px]">Reservas</span>
             </div>
           </div>
         </section>
 
-        {/* COLUNA DIREITA: CARD DO FORMULÁRIO */}
         <section className="lg:col-span-6 w-full max-w-xl mx-auto">
           <div className="bg-[#111726] border border-slate-800/90 rounded-3xl p-6 sm:p-8 shadow-2xl">
-            {/* SELETOR DE ABAS COM ALTO CONTRASTE NA ABA ATIVA (Card #1 do Trello) */}
             <div className="grid grid-cols-3 gap-1.5 bg-[#0A0E17] p-1.5 rounded-2xl border border-slate-800 mb-7">
               <button
                 type="button"
@@ -492,13 +455,12 @@ export default function LoginAndPublicPortal() {
               </button>
             </div>
 
-            {/* ABA 1: LOGIN (Sem botão Preencher ADM e sem texto de contas ativas - Card #2) */}
             {activeTab === "LOGIN" && (
               <form onSubmit={handleLogin} className="space-y-5">
                 <div>
                   <h2 className="text-2xl sm:text-3xl font-extrabold text-white">Que bom ter você aqui.</h2>
                   <p className="text-xs sm:text-sm text-slate-400 mt-1">
-                    Acesse sua conta para cuidar dos próximos encontros.
+                    Entre com sua conta (ADM, Equipe Interna, Equipe Externa ou Cliente).
                   </p>
                 </div>
 
@@ -541,20 +503,20 @@ export default function LoginAndPublicPortal() {
                 <div className="bg-[#0A0E17] border border-slate-800/90 rounded-2xl p-4 space-y-3">
                   <div className="flex items-center gap-2 text-xs font-bold text-slate-200">
                     <span className="text-amber-500">🔒</span>
-                    <span>Segurança da senha</span>
+                    <span>RBAC de Senha</span>
                   </div>
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 text-xs">
-                    <div className={pwCheck.minLength ? "text-emerald-400" : "text-slate-500"}>
-                      ✓ <span className="text-slate-300 ml-1">8 caracteres ou mais</span>
+                    <div className={pwCheck.minLength ? "text-emerald-400 font-semibold" : "text-slate-500"}>
+                      ✓ <span className="text-slate-300 ml-1">Tamanho mínimo (8+ caracteres)</span>
+                    </div>
+                    <div className={pwCheck.hasSpecial ? "text-emerald-400 font-semibold" : "text-slate-500"}>
+                      ✓ <span className="text-slate-300 ml-1">Caractere especial (!@#$%)</span>
                     </div>
                     <div className={pwCheck.hasUpper && pwCheck.hasLower ? "text-emerald-400" : "text-slate-500"}>
                       ✓ <span className="text-slate-300 ml-1">Maiúscula e minúscula</span>
                     </div>
                     <div className={pwCheck.hasNumber ? "text-emerald-400" : "text-slate-500"}>
                       ✓ <span className="text-slate-300 ml-1">Pelo menos 1 número</span>
-                    </div>
-                    <div className={pwCheck.hasSpecial ? "text-emerald-400" : "text-slate-500"}>
-                      ✓ <span className="text-slate-300 ml-1">1 caractere especial</span>
                     </div>
                   </div>
                 </div>
@@ -571,8 +533,6 @@ export default function LoginAndPublicPortal() {
                   </div>
                 )}
 
-                <p className="text-xs text-slate-400">Sua senha tem validade de 90 dias.</p>
-
                 <button
                   type="submit"
                   className="w-full bg-[#F59E0B] hover:bg-amber-400 text-slate-950 font-bold py-4 px-6 rounded-2xl transition flex items-center justify-between text-sm shadow-lg shadow-amber-500/10"
@@ -580,21 +540,9 @@ export default function LoginAndPublicPortal() {
                   <span>Entrar no sistema</span>
                   <span className="text-lg">→</span>
                 </button>
-
-                <p className="text-xs text-slate-400 pt-1">
-                  Ainda não tem uma conta?{" "}
-                  <button
-                    type="button"
-                    onClick={() => setActiveTab("AGENDE_EVENTO")}
-                    className="text-slate-200 hover:text-amber-400 underline font-semibold"
-                  >
-                    Agende seu primeiro evento.
-                  </button>
-                </p>
               </form>
             )}
 
-            {/* ABA 2: ESQUECI MINHA SENHA FUNCIONAL (Card #20 do Trello) */}
             {activeTab === "ESQUECI_SENHA" && (
               <div className="space-y-5">
                 <div className="w-12 h-12 rounded-2xl bg-amber-500/15 border border-amber-500/30 flex items-center justify-center text-amber-400 text-xl">
@@ -603,31 +551,24 @@ export default function LoginAndPublicPortal() {
 
                 <div>
                   <h2 className="text-2xl sm:text-3xl font-extrabold text-white leading-tight">
-                    Vamos recuperar
-                    <br />
-                    seu acesso.
+                    Vamos recuperar seu acesso.
                   </h2>
-                  <p className="text-xs sm:text-sm text-slate-400 mt-2 leading-relaxed">
-                    Enviaremos um código de recuperação para o e-mail cadastrado.
-                    <br />
-                    Ele será válido por 15 minutos.
+                  <p className="text-xs sm:text-sm text-slate-400 mt-2">
+                    Enviaremos um código de recuperação para o seu e-mail cadastrado.
                   </p>
                 </div>
 
                 <form onSubmit={handleSendRecoveryEmail} className="space-y-4">
                   <div>
                     <label className="block text-xs font-semibold text-slate-300 mb-2">E-mail cadastrado</label>
-                    <div className="relative">
-                      <input
-                        type="email"
-                        required
-                        value={recoveryEmail}
-                        onChange={(e) => setRecoveryEmail(e.target.value)}
-                        placeholder="seuemail@exemplo.com"
-                        className="w-full bg-[#0A0E17] border border-slate-800 focus:border-amber-500/70 rounded-xl px-4 py-3.5 text-sm text-white outline-none"
-                      />
-                      <span className="absolute right-4 top-1/2 -translate-y-1/2 text-slate-500 text-sm">✉️</span>
-                    </div>
+                    <input
+                      type="email"
+                      required
+                      value={recoveryEmail}
+                      onChange={(e) => setRecoveryEmail(e.target.value)}
+                      placeholder="seuemail@exemplo.com"
+                      className="w-full bg-[#0A0E17] border border-slate-800 rounded-xl px-4 py-3.5 text-sm text-white outline-none"
+                    />
                   </div>
 
                   <button
@@ -664,18 +605,16 @@ export default function LoginAndPublicPortal() {
                         required
                         value={typedToken}
                         onChange={(e) => setTypedToken(e.target.value)}
-                        placeholder="Ex: 123456"
                         className="w-full bg-[#111726] border border-slate-700 rounded-xl px-3.5 py-2.5 text-xs font-mono text-white"
                       />
                     </div>
                     <div>
-                      <label className="block text-xs text-slate-300 mb-1">Nova senha (padrão RBAC)</label>
+                      <label className="block text-xs text-slate-300 mb-1">Nova senha (mín. 8 + especial)</label>
                       <input
                         type="password"
                         required
                         value={newRecoveryPassword}
                         onChange={(e) => setNewRecoveryPassword(e.target.value)}
-                        placeholder="Mín. 8 caracteres + maiúscula + número + especial"
                         className="w-full bg-[#111726] border border-slate-700 rounded-xl px-3.5 py-2.5 text-xs text-white"
                       />
                     </div>
@@ -687,22 +626,15 @@ export default function LoginAndPublicPortal() {
                     </button>
                   </form>
                 )}
-
-                <p className="text-xs text-slate-500 leading-relaxed">
-                  A nova senha não pode repetir as últimas 3 utilizadas.
-                  <br />
-                  Envio seguro via Gmail API.
-                </p>
               </div>
             )}
 
-            {/* ABA 3: AGENDE SEU EVENTO */}
             {activeTab === "AGENDE_EVENTO" && (
               <form onSubmit={handlePreSchedule} className="space-y-6">
                 <div>
                   <h2 className="text-2xl font-extrabold text-white">Vamos planejar seu evento</h2>
                   <p className="text-xs sm:text-sm text-slate-400 mt-1">
-                    Preencha os detalhes. Nossa família confirma a sua reserva.
+                    Preencha os detalhes. Sua conta de Cliente já será criada automaticamente.
                   </p>
                 </div>
 
@@ -734,7 +666,7 @@ export default function LoginAndPublicPortal() {
                   </div>
 
                   <div>
-                    <label className="block text-xs font-medium text-slate-300 mb-1.5">Telefone</label>
+                    <label className="block text-xs font-medium text-slate-300 mb-1.5">Telefone ANATEL</label>
                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 items-center">
                       <input
                         type="tel"
@@ -744,15 +676,11 @@ export default function LoginAndPublicPortal() {
                         placeholder="(11) 99987-6543"
                         className="w-full bg-[#0A0E17] border border-slate-800 rounded-xl px-3.5 py-3 text-sm font-mono text-white"
                       />
-                      {phoneCheck.valid ? (
+                      {phoneCheck.valid && (
                         <div className="px-3.5 py-2.5 rounded-xl bg-emerald-950/50 border border-emerald-500/30 text-emerald-400 text-xs font-semibold">
                           ✓ {phoneCheck.regionUf?.replace(" - ", " · ")}
                         </div>
-                      ) : clientPhone.length >= 4 ? (
-                        <div className="px-3 py-2 rounded-xl bg-rose-950/50 border border-rose-500/30 text-rose-300 text-[11px]">
-                          {phoneCheck.error}
-                        </div>
-                      ) : null}
+                      )}
                     </div>
                   </div>
                 </div>
@@ -761,31 +689,18 @@ export default function LoginAndPublicPortal() {
                   <p className="text-[11px] font-bold tracking-[0.14em] text-amber-500 uppercase">
                     02 SOBRE O ENCONTRO
                   </p>
-
-                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
-                    {[
-                      { id: "Aniversário", label: "Aniversário", icon: "🎂" },
-                      { id: "Festa familiar", label: "Festa familiar", icon: "🎉" },
-                      { id: "Futebol", label: "Futebol", icon: "⚽" },
-                      { id: "Corporativo", label: "Corporativo", icon: "💼" },
-                    ].map((cat) => (
-                      <button
-                        key={cat.id}
-                        type="button"
-                        onClick={() => setEventType(cat.id)}
-                        className={`py-2.5 px-3 rounded-xl border text-xs font-semibold flex items-center justify-center gap-1.5 transition ${
-                          eventType === cat.id
-                            ? "bg-amber-500/15 border-amber-500/50 text-amber-400"
-                            : "bg-[#0A0E17] border-slate-800 text-slate-300 hover:border-slate-700"
-                        }`}
-                      >
-                        <span>{cat.icon}</span>
-                        <span>{cat.label}</span>
-                      </button>
-                    ))}
-                  </div>
-
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                    <div>
+                      <label className="block text-xs font-medium text-slate-300 mb-1.5">Categoria *</label>
+                      <input
+                        type="text"
+                        required
+                        value={eventType}
+                        onChange={(e) => setEventType(e.target.value)}
+                        placeholder="Ex: Aniversário"
+                        className="w-full bg-[#0A0E17] border border-slate-800 rounded-xl px-3.5 py-3 text-sm text-white"
+                      />
+                    </div>
                     <div>
                       <label className="block text-xs font-medium text-slate-300 mb-1.5">
                         Para quem é o evento? *
@@ -806,7 +721,7 @@ export default function LoginAndPublicPortal() {
                         required
                         value={eventTitle}
                         onChange={(e) => setEventTitle(e.target.value)}
-                        placeholder="Aniversário da Ana Clara"
+                        placeholder="Festa da Ana"
                         className="w-full bg-[#0A0E17] border border-slate-800 rounded-xl px-3.5 py-3 text-sm text-white"
                       />
                     </div>
@@ -845,50 +760,44 @@ export default function LoginAndPublicPortal() {
                     </div>
                   </div>
 
-                  {!currentConflict ? (
+                  {!currentConflict && (
                     <div className="px-4 py-2.5 rounded-xl bg-emerald-950/50 border border-emerald-500/30 text-emerald-400 text-xs font-medium">
                       ✓ Data disponível · Intervalo de limpeza até {getCleanupEndTime(endTime)}
-                    </div>
-                  ) : (
-                    <div className="px-4 py-2.5 rounded-xl bg-rose-950/50 border border-rose-500/30 text-rose-300 text-xs font-medium">
-                      ✕ Horário ocupado por &quot;{currentConflict.title}&quot; ({currentConflict.startTime} às{" "}
-                      {currentConflict.endTime} + 1h limpeza)
                     </div>
                   )}
                 </div>
 
                 <div className="space-y-3">
-                  <p className="text-[11px] font-bold tracking-[0.14em] text-amber-500 uppercase">03 CRIE SUA CONTA</p>
-                  <div>
-                    <label className="block text-xs font-medium text-slate-300 mb-1.5">Crie uma senha</label>
-                    <div className="relative">
-                      <input
-                        type={showClientPassword ? "text" : "password"}
-                        required
-                        value={clientPassword}
-                        onChange={(e) => setClientPassword(e.target.value)}
-                        placeholder="••••••••••••"
-                        className="w-full bg-[#0A0E17] border border-slate-800 rounded-xl px-3.5 py-3 text-sm text-white"
-                      />
-                      <button
-                        type="button"
-                        onClick={() => setShowClientPassword(!showClientPassword)}
-                        className="absolute right-4 top-1/2 -translate-y-1/2 text-slate-400 text-xs"
-                      >
-                        {showClientPassword ? "🙈" : "👁️"}
-                      </button>
-                    </div>
+                  <p className="text-[11px] font-bold tracking-[0.14em] text-amber-500 uppercase">03 CRIE SUA SENHA RBAC</p>
+                  <div className="relative">
+                    <input
+                      type={showClientPassword ? "text" : "password"}
+                      required
+                      value={clientPassword}
+                      onChange={(e) => setClientPassword(e.target.value)}
+                      placeholder="••••••••••••"
+                      className="w-full bg-[#0A0E17] border border-slate-800 rounded-xl px-3.5 py-3 text-sm text-white"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowClientPassword(!showClientPassword)}
+                      className="absolute right-4 top-1/2 -translate-y-1/2 text-slate-400 text-xs"
+                    >
+                      {showClientPassword ? "🙈" : "👁️"}
+                    </button>
                   </div>
 
                   <div className="flex flex-wrap gap-x-4 gap-y-1 text-[11px]">
-                    <span className={pwCheck.minLength ? "text-emerald-400" : "text-slate-500"}>✓ 8 caracteres</span>
+                    <span className={pwCheck.minLength ? "text-emerald-400 font-bold" : "text-slate-500"}>
+                      ✓ Mínimo 8 caracteres
+                    </span>
+                    <span className={pwCheck.hasSpecial ? "text-emerald-400 font-bold" : "text-slate-500"}>
+                      ✓ Caractere especial (!@#$)
+                    </span>
                     <span className={pwCheck.hasUpper && pwCheck.hasLower ? "text-emerald-400" : "text-slate-500"}>
                       ✓ Maiúscula e minúscula
                     </span>
                     <span className={pwCheck.hasNumber ? "text-emerald-400" : "text-slate-500"}>✓ Número</span>
-                    <span className={pwCheck.hasSpecial ? "text-emerald-400" : "text-slate-500"}>
-                      ✓ Caractere especial
-                    </span>
                   </div>
                 </div>
 
@@ -904,10 +813,6 @@ export default function LoginAndPublicPortal() {
                   </div>
                 )}
 
-                <p className="text-[11px] text-slate-400">
-                  Ao solicitar, você concorda com as regras de uso do espaço.
-                </p>
-
                 <button
                   type="submit"
                   className="w-full bg-[#10B981] hover:bg-emerald-400 text-slate-950 font-bold py-4 px-6 rounded-2xl transition flex items-center justify-center gap-2 text-sm shadow-lg shadow-emerald-500/10"
@@ -920,17 +825,6 @@ export default function LoginAndPublicPortal() {
           </div>
         </section>
       </main>
-
-      <footer className="w-full border-t border-slate-800/60 py-5 px-4 sm:px-8 text-xs text-slate-500">
-        <div className="max-w-7xl mx-auto flex flex-col sm:flex-row items-center justify-between gap-2">
-          <span>2026 Churrasco dos Da Hora. Feito para reunir.</span>
-          <div className="flex items-center gap-4">
-            <span>Acesso seguro e protegido</span>
-            <span>·</span>
-            <span>Horário de Brasília</span>
-          </div>
-        </div>
-      </footer>
     </div>
   );
 }
