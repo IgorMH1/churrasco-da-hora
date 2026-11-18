@@ -4,11 +4,13 @@ import React, { useState, useEffect } from "react";
 import { applyAnatelPhoneMask, validateAnatelPhone } from "../../lib/services/anatel";
 import { getNowGmt3, hasScheduleConflict, validatePasswordRbac } from "../../lib/services/rbacAndTime";
 import {
-  loadInitialData,
+  fetchAllFromSupabase,
   saveEventsToStorage,
   saveClientsToStorage,
   saveStaffToStorage,
   saveUsersToStorage,
+  insertBackupLogInSupabase,
+  deleteBackupLogFromSupabase,
   resetDatabaseToAdminOnly,
   generateGoogleCalendarUrl,
   setCurrentUserSession,
@@ -17,17 +19,10 @@ import {
   EventRecord,
   UserAccount,
   UserRole,
+  BackupLogRecord,
 } from "../../lib/services/storage";
 
 type AdminTab = "DASHBOARD" | "EVENTOS" | "CADASTROS" | "BACKUP";
-
-interface BackupLog {
-  id: string;
-  scope: "Usuários" | "Eventos" | "Completo";
-  format: "JSON" | "SQL";
-  exportedAtGmt3: string;
-  exportedBy: string;
-}
 
 function isDateInCurrentWeek(dateStr: string, todayStr: string): boolean {
   if (!dateStr || !todayStr) return false;
@@ -64,7 +59,7 @@ export default function AdminPortalPage() {
   const [clients, setClients] = useState<ClientRecord[]>([]);
   const [staffList, setStaffList] = useState<StaffMember[]>([]);
   const [events, setEvents] = useState<EventRecord[]>([]);
-  const [backupLogs, setBackupLogs] = useState<BackupLog[]>([]);
+  const [backupLogs, setBackupLogs] = useState<BackupLogRecord[]>([]);
 
   // Estados de Gestão de Eventos
   const [statusFilter, setStatusFilter] = useState<"TODOS" | "PENDENTE" | "CONFIRMADO" | "CANCELADO">("TODOS");
@@ -110,7 +105,7 @@ export default function AdminPortalPage() {
   const [roleFilterTab, setRoleFilterTab] = useState<"TODOS" | UserRole>("TODOS");
   const [personSearch, setPersonSearch] = useState("");
 
-  // Modal de Edição de Usuário Cadastrado
+  // Modal de Edição de Utilizador Cadastrado
   const [editingUser, setEditingUser] = useState<UserAccount | null>(null);
   const [editUserName, setEditUserName] = useState("");
   const [editUserEmail, setEditUserEmail] = useState("");
@@ -126,11 +121,13 @@ export default function AdminPortalPage() {
     setTodayGmt3(now.dateStr);
     setEvDate(now.dateStr);
 
-    const data = loadInitialData();
-    setUsers(data.users);
-    setEvents(data.events);
-    setClients(data.clients);
-    setStaffList(data.staff);
+    fetchAllFromSupabase().then((data) => {
+      setUsers(data.users);
+      setEvents(data.events);
+      setClients(data.clients);
+      setStaffList(data.staff);
+      setBackupLogs(data.backupLogs);
+    });
   }, []);
 
   const eventsThisWeek = events.filter(
@@ -142,7 +139,7 @@ export default function AdminPortalPage() {
   const cadPwCheck = validatePasswordRbac(cadPassword);
   const editPwCheck = validatePasswordRbac(editUserNewPassword);
 
-  // Sincroniza a tabela central `users` com `staff` e `clients`
+  // Sincroniza a tabela central `users` com `staff`, `clients` e o Supabase
   const syncAllTablesFromUsers = (updatedUsers: UserAccount[]) => {
     setUsers(updatedUsers);
     saveUsersToStorage(updatedUsers);
@@ -179,7 +176,7 @@ export default function AdminPortalPage() {
     saveClientsToStorage(syncedClients);
   };
 
-  // CADASTRAR NOVA CONTA FUNCIONAL PARA QUALQUER UM DOS 4 PERFIS RBAC
+  // CADASTRAR NOVA CONTA NO SUPABASE PARA QUALQUER UM DOS 4 PERFIS RBAC
   const handleSaveCadastro = (e: React.FormEvent) => {
     e.preventDefault();
     if (!phoneValidation.valid) {
@@ -229,7 +226,7 @@ export default function AdminPortalPage() {
           : cadSpecialty || "Apoio Operacional",
       companyName:
         cadRole === "EQUIPE_EXTERNA"
-          ? cadCompany || "Autônomo / MEI"
+          ? cadCompany || "Autónomo / MEI"
           : cadRole === "EQUIPE_INTERNA" || cadRole === "ADM"
           ? "Família Da Hora"
           : undefined,
@@ -251,11 +248,10 @@ export default function AdminPortalPage() {
 
     setFeedback({
       type: "success",
-      text: `✓ Conta criada com sucesso! ${newUser.name} (${newUser.role}) já pode fazer login usando ${newUser.email}.`,
+      text: `✓ Conta guardada no Supabase! ${newUser.name} (${newUser.role}) já pode iniciar sessão usando ${newUser.email}.`,
     });
   };
 
-  // Editar Usuário Cadastrado (qualquer um dos 4 perfis)
   const openEditUserModal = (u: UserAccount) => {
     setEditingUser(u);
     setEditUserName(u.name);
@@ -280,7 +276,7 @@ export default function AdminPortalPage() {
     if (editUserNewPassword && !editPwCheck.isValid) {
       setFeedback({
         type: "error",
-        text: "A nova senha precisa ter no mínimo 8 caracteres e incluir caractere especial.",
+        text: "A nova senha precisa de ter no mínimo 8 caracteres e incluir caractere especial.",
       });
       return;
     }
@@ -311,7 +307,7 @@ export default function AdminPortalPage() {
     setEditingUser(null);
     setFeedback({
       type: "success",
-      text: `✓ Perfil #${editingUser.id} (${editUserName}) atualizado! As credenciais de login já estão ativas.`,
+      text: `✓ Perfil #${editingUser.id} (${editUserName}) atualizado no Supabase!`,
     });
   };
 
@@ -330,14 +326,14 @@ export default function AdminPortalPage() {
     );
     setEvents(updated);
     saveEventsToStorage(updated);
-    setFeedback({ type: "success", text: "✓ Evento aprovado e sincronizado com o Google Calendar!" });
+    setFeedback({ type: "success", text: "✓ Evento aprovado no Supabase e sincronizado com o Google Calendar!" });
   };
 
   const handleCancelEvent = (id: string) => {
     const updated = events.map((ev) => (ev.id === id ? { ...ev, status: "CANCELADO" as const } : ev));
     setEvents(updated);
     saveEventsToStorage(updated);
-    setFeedback({ type: "success", text: "Evento cancelado e horário liberado na agenda." });
+    setFeedback({ type: "success", text: "Evento cancelado no Supabase e horário libertado na agenda." });
   };
 
   const openEventModal = (ev: EventRecord) => {
@@ -382,7 +378,7 @@ export default function AdminPortalPage() {
     setEvents(updatedList);
     saveEventsToStorage(updatedList);
     setEditingEvent(null);
-    setFeedback({ type: "success", text: "✓ Dados e escala do evento atualizados!" });
+    setFeedback({ type: "success", text: "✓ Dados e escala do evento atualizados no Supabase!" });
   };
 
   const handleCreateManualEvent = (e: React.FormEvent) => {
@@ -437,10 +433,10 @@ export default function AdminPortalPage() {
     setEvCategoryText("");
     setEvHonoree("");
     setEvClient("");
-    setFeedback({ type: "success", text: "✓ Novo agendamento criado e sincronizado!" });
+    setFeedback({ type: "success", text: "✓ Novo agendamento guardado no Supabase!" });
   };
 
-  const handleDownloadBackup = (scope: "Usuários" | "Eventos" | "Completo", format: "JSON" | "SQL") => {
+  const handleDownloadBackup = async (scope: "Usuários" | "Eventos" | "Completo", format: "JSON" | "SQL") => {
     const now = getNowGmt3();
     let content = "";
     const filename = `backup_${scope.toLowerCase()}_${now.dateStr}.${format.toLowerCase()}`;
@@ -482,30 +478,33 @@ export default function AdminPortalPage() {
     a.click();
     URL.revokeObjectURL(url);
 
-    setBackupLogs([
-      {
-        id: `BKP-${Math.floor(1000 + Math.random() * 9000)}`,
-        scope,
-        format,
-        exportedAtGmt3: `${now.dateStr.split("-").reverse().join("/")} ${now.timeStr}`,
-        exportedBy: "Administrador Da Hora",
-      },
-      ...backupLogs,
-    ]);
-    setFeedback({ type: "success", text: `✓ Exportação "${filename}" concluída!` });
+    const newLog: BackupLogRecord = {
+      id: `BKP-${Math.floor(1000 + Math.random() * 9000)}`,
+      scope,
+      format,
+      exportedAtGmt3: `${now.dateStr.split("-").reverse().join("/")} ${now.timeStr}`,
+      exportedBy: "Administrador Da Hora",
+    };
+
+    setBackupLogs([newLog, ...backupLogs]);
+    await insertBackupLogInSupabase(newLog);
+    setFeedback({ type: "success", text: `✓ Exportação "${filename}" concluída e registada no Supabase!` });
   };
 
-  const handleDeleteLastBackup = () => {
+  const handleDeleteLastBackup = async () => {
     if (backupLogs.length === 0) {
       setFeedback({ type: "error", text: "Não há backups no histórico para excluir." });
       return;
     }
+    const lastLog = backupLogs[0];
     setBackupLogs(backupLogs.slice(1));
-    setFeedback({ type: "success", text: "🗑️ Último backup excluído do histórico!" });
+    await deleteBackupLogFromSupabase(lastLog.id);
+    setFeedback({ type: "success", text: "🗑️ Último backup excluído do Supabase!" });
   };
 
-  const handleResetSystemFromBackupTab = () => {
-    const clean = resetDatabaseToAdminOnly();
+  // CORRIGIDO: Adicionado async / await para resolver a Promise do resetDatabaseToAdminOnly()
+  const handleResetSystemFromBackupTab = async () => {
+    const clean = await resetDatabaseToAdminOnly();
     setUsers(clean.users);
     setEvents(clean.events);
     setClients(clean.clients);
@@ -514,7 +513,7 @@ export default function AdminPortalPage() {
     setEvStaffSelected([]);
     setFeedback({
       type: "success",
-      text: "🧹 Sistema resetado com sucesso! Mantido apenas o login ADM padrão.",
+      text: "🧹 Sistema e tabelas do Supabase resetados com sucesso! Mantido apenas o login ADM padrão.",
     });
   };
 
@@ -594,8 +593,8 @@ export default function AdminPortalPage() {
             <span className="text-[11px] font-semibold text-emerald-400 flex items-center gap-1.5">
               <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" /> ✓ Conectado
             </span>
-            <p className="text-xs font-bold text-white">Google Calendar</p>
-            <p className="text-[11px] text-slate-400">Agenda sempre em sintonia.</p>
+            <p className="text-xs font-bold text-white">Supabase & Google Calendar</p>
+            <p className="text-[11px] text-slate-400">Banco em nuvem sincronizado.</p>
           </div>
 
           <div className="border-t border-slate-800/80 pt-4 space-y-3">
@@ -627,7 +626,7 @@ export default function AdminPortalPage() {
         <header className="border-b border-slate-800/80 px-6 py-5 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
           <div>
             <p className="text-[10px] font-bold tracking-[0.18em] text-amber-500 uppercase">
-              ADMINISTRAÇÃO DO ESPAÇO
+              ADMINISTRAÇÃO DO ESPAÇO · SUPABASE CLOUD
             </p>
             <h1 className="text-2xl sm:text-3xl font-extrabold text-white mt-0.5">
               {activeTab === "DASHBOARD" && "Dashboard"}
@@ -636,10 +635,10 @@ export default function AdminPortalPage() {
               {activeTab === "BACKUP" && "Backup e governança"}
             </h1>
             <p className="text-xs text-slate-400 mt-0.5">
-              {activeTab === "DASHBOARD" && "Visão geral da Agenda da Semana."}
+              {activeTab === "DASHBOARD" && "Visão geral da Agenda da Semana sincronizada no Supabase."}
               {activeTab === "EVENTOS" && "Calendário interativo, categorias livres e escala."}
               {activeTab === "CADASTROS" &&
-                "Qualquer conta criada aqui (ADM, Equipe Interna, Equipe Externa ou Cliente) já pode fazer login imediatamente."}
+                "Qualquer conta criada aqui é gravada no Supabase e já pode fazer login imediatamente."}
               {activeTab === "BACKUP" && "Exportação segura, exclusão de último backup e reset."}
             </p>
           </div>
@@ -691,7 +690,7 @@ export default function AdminPortalPage() {
                   <p className="text-4xl font-extrabold text-white mt-2">
                     {String(eventsThisWeek.length).padStart(2, "0")}
                   </p>
-                  <p className="text-xs text-amber-400/80 mt-1">Clique para gerenciar →</p>
+                  <p className="text-xs text-amber-400/80 mt-1">Clique para gerir →</p>
                 </div>
 
                 <div
@@ -725,7 +724,7 @@ export default function AdminPortalPage() {
                   <p className="text-4xl font-extrabold text-amber-400 mt-2">
                     {String(pendingEvents.length).padStart(2, "0")}
                   </p>
-                  <p className="text-xs text-slate-500 mt-1">Revisar solicitações →</p>
+                  <p className="text-xs text-slate-500 mt-1">Rever solicitações →</p>
                 </div>
 
                 <div
@@ -733,13 +732,13 @@ export default function AdminPortalPage() {
                   className="cursor-pointer bg-[#111726] hover:bg-[#161E31] border border-slate-800/90 rounded-2xl p-5 border-t-2 border-t-sky-500 transition"
                 >
                   <div className="flex justify-between items-center text-xs text-slate-400">
-                    <span>Contas RBAC ativas</span>
+                    <span>Contas RBAC no Supabase</span>
                     <span className="text-sky-400">👥</span>
                   </div>
                   <p className="text-4xl font-extrabold text-white mt-2">
                     {String(users.length).padStart(2, "0")}
                   </p>
-                  <p className="text-xs text-slate-500 mt-1">Gerenciar os 4 perfis →</p>
+                  <p className="text-xs text-slate-500 mt-1">Gerir os 4 perfis →</p>
                 </div>
               </div>
 
@@ -749,7 +748,7 @@ export default function AdminPortalPage() {
                     <div>
                       <h2 className="text-lg font-extrabold text-white">Agenda da semana</h2>
                       <p className="text-xs text-slate-400">
-                        Clique em um evento para editar dados ou clique em &quot;Editar escala&quot;
+                        Clique num evento para editar dados ou clique em &quot;Editar escala&quot;
                       </p>
                     </div>
                     <span className="text-xs bg-[#0A0E17] border border-slate-800 px-3 py-1 rounded-full text-amber-400 font-semibold">
@@ -838,7 +837,7 @@ export default function AdminPortalPage() {
                 <div className="xl:col-span-4 space-y-4">
                   <div className="bg-[#111726] border border-slate-800/90 rounded-3xl p-5 space-y-3">
                     <div className="flex justify-between items-center">
-                      <h3 className="text-sm font-bold text-white">Precisam de você</h3>
+                      <h3 className="text-sm font-bold text-white">Precisam de si</h3>
                       <span className="text-[11px] text-amber-400 font-semibold">
                         {pendingEvents.length} pendente(s)
                       </span>
@@ -885,7 +884,7 @@ export default function AdminPortalPage() {
               >
                 <div>
                   <h2 className="text-lg font-extrabold text-white">Novo agendamento</h2>
-                  <p className="text-xs text-slate-400">Crie, escale a equipe e sincronize.</p>
+                  <p className="text-xs text-slate-400">Crie, escale a equipa e grave no Supabase.</p>
                 </div>
 
                 <div>
@@ -1017,7 +1016,7 @@ export default function AdminPortalPage() {
                   type="submit"
                   className="w-full bg-[#F59E0B] hover:bg-amber-400 text-slate-950 font-bold py-3.5 rounded-2xl text-xs transition"
                 >
-                  Agendar e sincronizar Google Calendar
+                  Agendar e sincronizar no Supabase
                 </button>
               </form>
 
@@ -1104,7 +1103,7 @@ export default function AdminPortalPage() {
                       type="text"
                       value={searchQuery}
                       onChange={(e) => setSearchQuery(e.target.value)}
-                      placeholder="🔍 Buscar evento..."
+                      placeholder="🔍 Procurar evento..."
                       className="bg-[#0A0E17] border border-slate-800 rounded-xl px-3.5 py-2 text-xs text-white"
                     />
                   </div>
@@ -1154,7 +1153,7 @@ export default function AdminPortalPage() {
             </div>
           )}
 
-          {/* ABA 3: CADASTROS COM 4 ABAS DE PERFIL RBAC (ADM, EQUIPE INTERNA, EQUIPE EXTERNA, CLIENTE) */}
+          {/* ABA 3: CADASTROS COM 4 ABAS DE PERFIL RBAC */}
           {activeTab === "CADASTROS" && (
             <div className="space-y-6">
               <form
@@ -1165,11 +1164,10 @@ export default function AdminPortalPage() {
                   <div>
                     <h2 className="text-lg font-extrabold text-white">Adicionar uma pessoa (4 Perfis RBAC)</h2>
                     <p className="text-xs text-slate-400">
-                      Selecione a aba do perfil abaixo. A conta criada já fica habilitada para login imediato.
+                      Selecione a aba do perfil abaixo. A conta é salva diretamente no Supabase.
                     </p>
                   </div>
 
-                  {/* SELETOR DE 4 ABAS DE PERFIL RBAC */}
                   <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5 bg-[#0A0E17] p-1.5 rounded-2xl border border-slate-800">
                     {[
                       { id: "ADM", label: "🛡️ ADM" },
@@ -1358,12 +1356,11 @@ export default function AdminPortalPage() {
                     type="submit"
                     className="w-full sm:w-auto bg-[#F59E0B] hover:bg-amber-400 text-slate-950 font-bold py-3 px-8 rounded-2xl text-xs transition"
                   >
-                    + Criar Conta ({cadRole})
+                    + Criar Conta no Supabase ({cadRole})
                   </button>
                 </div>
               </form>
 
-              {/* ABAS DE FILTRO POR PERFIL E TABELA DE CONTAS ABAIXO */}
               <div className="w-full bg-[#111726] border border-slate-800/90 rounded-3xl p-6 space-y-5">
                 <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
                   <div className="flex flex-wrap gap-1.5 bg-[#0A0E17] p-1 rounded-xl border border-slate-800">
@@ -1401,7 +1398,7 @@ export default function AdminPortalPage() {
                     type="text"
                     value={personSearch}
                     onChange={(e) => setPersonSearch(e.target.value)}
-                    placeholder="🔍 Buscar por nome, ID, e-mail ou telefone..."
+                    placeholder="🔍 Procurar por nome, ID, e-mail ou telefone..."
                     className="bg-[#0A0E17] border border-slate-800 rounded-xl px-4 py-2.5 text-xs text-white w-full md:w-80"
                   />
                 </div>
@@ -1481,13 +1478,13 @@ export default function AdminPortalPage() {
                   {
                     scope: "Usuários" as const,
                     title: "Pessoas e acessos",
-                    desc: "Todas as contas dos 4 perfis RBAC (ADM, Equipe Interna, Equipe Externa e Clientes).",
+                    desc: "Todas as contas dos 4 perfis RBAC sincronizadas no Supabase.",
                     badge: `${users.length} contas`,
                   },
                   {
                     scope: "Eventos" as const,
                     title: "Eventos e escalas",
-                    desc: "Histórico completo, homenageados, datas em GMT-3 e equipes escaladas.",
+                    desc: "Histórico completo, homenageados, datas em GMT-3 e equipas escaladas.",
                     badge: `${events.length} eventos`,
                   },
                   {
@@ -1529,9 +1526,9 @@ export default function AdminPortalPage() {
 
               <div className="bg-[#111726] border border-amber-500/30 rounded-3xl p-5 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
                 <div>
-                  <h3 className="text-sm font-extrabold text-white">Controle de Governança e Reset</h3>
+                  <h3 className="text-sm font-extrabold text-white">Controlo de Governança e Reset</h3>
                   <p className="text-xs text-slate-400">
-                    Exclua o último backup ou resete o sistema mantendo apenas o ADM padrão.
+                    Exclua o último backup ou faça reset às tabelas do Supabase mantendo apenas o ADM padrão.
                   </p>
                 </div>
                 <div className="flex flex-wrap gap-2.5 shrink-0">
@@ -1657,7 +1654,7 @@ export default function AdminPortalPage() {
                 type="submit"
                 className="flex-1 bg-[#F59E0B] hover:bg-amber-400 text-slate-950 font-bold py-3 rounded-xl"
               >
-                Salvar informações
+                Guardar informações
               </button>
               <button
                 type="button"
@@ -1738,7 +1735,7 @@ export default function AdminPortalPage() {
                 type="submit"
                 className="flex-1 bg-[#F59E0B] hover:bg-amber-400 text-slate-950 font-bold py-3 rounded-xl"
               >
-                Salvar alterações
+                Guardar alterações
               </button>
               <button
                 type="button"
