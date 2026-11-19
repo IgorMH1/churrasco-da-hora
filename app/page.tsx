@@ -43,7 +43,7 @@ export default function LoginAndPublicPortal() {
   const [newRecoveryPassword, setNewRecoveryPassword] = useState("");
   const [recoveryFeedback, setRecoveryFeedback] = useState<{ type: "error" | "success"; text: string } | null>(null);
 
-  // Estados do "Agende seu evento" (Card #25: Quantidade de pessoas)
+  // Estados do "Agende seu evento"
   const [clientName, setClientName] = useState("");
   const [clientEmail, setClientEmail] = useState("");
   const [clientPhone, setClientPhone] = useState("");
@@ -152,8 +152,9 @@ export default function LoginAndPublicPortal() {
     setLockedUntil(null);
     setCurrentUserSession(foundUser);
 
+    // REGRA RBAC: ADM e EQUIPE_INTERNA acessam /admin (Equipe Interna tem acesso a tudo, exceto Backup)
     const targetRoute =
-      foundUser.role === "ADM"
+      foundUser.role === "ADM" || foundUser.role === "EQUIPE_INTERNA"
         ? "/admin"
         : foundUser.role === "CLIENTE"
         ? "/cliente"
@@ -296,6 +297,7 @@ export default function LoginAndPublicPortal() {
       endTime,
       status: "PENDENTE",
       supportTeam: ["A definir pelo ADM"],
+      confirmedStaff: [],
     };
     const updatedEvents = [newEvent, ...cloudData.events];
     setAllEvents(updatedEvents);
@@ -357,26 +359,25 @@ export default function LoginAndPublicPortal() {
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 pt-2 border-t border-slate-800/80 max-w-lg text-xs">
             <div className="bg-[#111726] border border-slate-800 p-3 rounded-xl">
               <span className="text-amber-400 font-bold block">ADM</span>
-              <span className="text-slate-400 text-[11px]">Gestão total</span>
+              <span className="text-slate-400 text-[11px]">Gestão + Backup</span>
             </div>
             <div className="bg-[#111726] border border-slate-800 p-3 rounded-xl">
               <span className="text-purple-400 font-bold block">Eq. Interna</span>
-              <span className="text-slate-400 text-[11px]">Apoio fixo</span>
+              <span className="text-slate-400 text-[11px]">Gestão completa</span>
             </div>
             <div className="bg-[#111726] border border-slate-800 p-3 rounded-xl">
               <span className="text-emerald-400 font-bold block">Eq. Externa</span>
-              <span className="text-slate-400 text-[11px]">Terceirizados</span>
+              <span className="text-slate-400 text-[11px]">Escala e diárias</span>
             </div>
             <div className="bg-[#111726] border border-slate-800 p-3 rounded-xl">
               <span className="text-sky-400 font-bold block">Clientes</span>
-              <span className="text-slate-400 text-[11px]">Reservas</span>
+              <span className="text-slate-400 text-[11px]">Reservas online</span>
             </div>
           </div>
         </section>
 
         <section className="lg:col-span-6 w-full max-w-xl mx-auto">
           <div className="bg-[#111726] border border-slate-800/90 rounded-3xl p-6 sm:p-8 shadow-2xl">
-            {/* CARD #29: Botão "Agende seu evento" à esquerda, separado do bloco de Login */}
             <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3 mb-7 pb-4 border-b border-slate-800/80">
               <button
                 type="button"
@@ -605,7 +606,6 @@ export default function LoginAndPublicPortal() {
                   />
                 </div>
 
-                {/* CARD #25: Campo "Quantidade de pessoas" no lugar de "Para quem é o evento" */}
                 <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                   <div>
                     <label className="block text-xs font-medium text-slate-300 mb-1">Categoria *</label>
