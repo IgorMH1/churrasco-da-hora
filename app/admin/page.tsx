@@ -2,7 +2,12 @@
 
 import React, { useState, useEffect } from "react";
 import { applyAnatelPhoneMask, validateAnatelPhone } from "../../lib/services/anatel";
-import { getNowGmt3, hasScheduleConflict, validatePasswordRbac } from "../../lib/services/rbacAndTime";
+import {
+  getNowGmt3,
+  hasScheduleConflict,
+  validatePasswordRbac,
+  getPasswordDaysRemaining,
+} from "../../lib/services/rbacAndTime";
 import {
   fetchAllFromSupabase,
   saveEventsToStorage,
@@ -24,7 +29,7 @@ import {
   BackupLogRecord,
 } from "../../lib/services/storage";
 
-type AdminTab = "DASHBOARD" | "EVENTOS" | "CADASTROS" | "BACKUP";
+type AdminTab = "DASHBOARD" | "EVENTOS" | "CADASTROS" | "MINHA_CONTA" | "BACKUP";
 
 const MONTH_NAMES_PT = [
   { num: "01", name: "Janeiro" },
@@ -66,7 +71,6 @@ function getStatusBadgeClasses(status: EventRecord["status"]): string {
   return "bg-orange-500/15 text-orange-400 border border-orange-500/40";
 }
 
-// Verifica se um profissional escalado já consta na lista `confirmedStaff` do evento
 function isStaffMemberConfirmed(memberName: string, confirmedList?: string[]): boolean {
   if (!confirmedList || confirmedList.length === 0) return false;
   const cleanMember = memberName.trim().toLowerCase();
@@ -86,7 +90,7 @@ export default function AdminPortalPage() {
   const [events, setEvents] = useState<EventRecord[]>([]);
   const [backupLogs, setBackupLogs] = useState<BackupLogRecord[]>([]);
 
-  // Modal de "Novo agendamento rápido"
+  // Modal de "Novo agendamento rápido" (Apenas ADM)
   const [showNewEventModal, setShowNewEventModal] = useState<boolean>(false);
 
   // Estados de Gestão de Eventos
@@ -103,7 +107,7 @@ export default function AdminPortalPage() {
   const [evEnd, setEvEnd] = useState("21:00");
   const [evStaffSelected, setEvStaffSelected] = useState<string[]>([]);
 
-  // Modal de Edição de Escala / Dados do Evento + Confirmação de Presença
+  // Modal de Edição de Escala / Dados do Evento (Apenas ADM)
   const [editingEvent, setEditingEvent] = useState<EventRecord | null>(null);
   const [modTitle, setModTitle] = useState("");
   const [modCategory, setModCategory] = useState("");
@@ -118,7 +122,7 @@ export default function AdminPortalPage() {
   const [modConfirmedStaff, setModConfirmedStaff] = useState<string[]>([]);
   const [modNotes, setModNotes] = useState("");
 
-  // Estados de Cadastros para os 4 Perfis RBAC
+  // Estados de Cadastros para os 4 Perfis RBAC (Criação/Edição apenas para ADM)
   const [cadRole, setCadRole] = useState<UserRole>("EQUIPE_EXTERNA");
   const [cadName, setCadName] = useState("");
   const [cadEmail, setCadEmail] = useState("");
@@ -133,7 +137,7 @@ export default function AdminPortalPage() {
   const [roleFilterTab, setRoleFilterTab] = useState<"TODOS" | UserRole>("TODOS");
   const [personSearch, setPersonSearch] = useState("");
 
-  // Modal de Edição de Conta
+  // Modal de Edição de Conta de Terceiros (Apenas ADM)
   const [editingUser, setEditingUser] = useState<UserAccount | null>(null);
   const [editUserName, setEditUserName] = useState("");
   const [editUserEmail, setEditUserEmail] = useState("");
@@ -144,6 +148,15 @@ export default function AdminPortalPage() {
   const [editUserStatus, setEditUserStatus] = useState<"ATIVO" | "INATIVO">("ATIVO");
   const [editUserNewPassword, setEditUserNewPassword] = useState("");
 
+  // Estados da Nova Aba "MINHA_CONTA" (Autogestão do próprio usuário logado)
+  const [myAccountName, setMyAccountName] = useState("");
+  const [myAccountEmail, setMyAccountEmail] = useState("");
+  const [myAccountPhone, setMyAccountPhone] = useState("");
+  const [myAccountSpecialty, setMyAccountSpecialty] = useState("");
+  const [myCurrentPassword, setMyCurrentPassword] = useState("");
+  const [myNewPassword, setMyNewPassword] = useState("");
+  const [myConfirmPassword, setMyConfirmPassword] = useState("");
+
   useEffect(() => {
     const now = getNowGmt3();
     setTodayGmt3(now.dateStr);
@@ -152,7 +165,6 @@ export default function AdminPortalPage() {
 
     const session = getCurrentUserSession();
     if (session) {
-      // Se não for ADM nem EQUIPE_INTERNA, redireciona para a área correta
       if (session.role === "CLIENTE") {
         window.location.href = "/cliente";
         return;
@@ -163,6 +175,15 @@ export default function AdminPortalPage() {
       }
       setCurrentUser(session);
       setEvAdmin(session.name);
+      setMyAccountName(session.name);
+      setMyAccountEmail(session.email);
+      setMyAccountPhone(session.phoneAnatel);
+      setMyAccountSpecialty(session.specialty || "");
+    } else {
+      setMyAccountName(DEFAULT_ADMIN_USER.name);
+      setMyAccountEmail(DEFAULT_ADMIN_USER.email);
+      setMyAccountPhone(DEFAULT_ADMIN_USER.phoneAnatel);
+      setMyAccountSpecialty(DEFAULT_ADMIN_USER.specialty || "");
     }
 
     fetchAllFromSupabase().then((data) => {
@@ -179,14 +200,20 @@ export default function AdminPortalPage() {
         if (fresh) {
           setCurrentUser(fresh);
           setCurrentUserSession(fresh);
+          setMyAccountName(fresh.name);
+          setMyAccountEmail(fresh.email);
+          setMyAccountPhone(fresh.phoneAnatel);
+          setMyAccountSpecialty(fresh.specialty || "");
         }
       }
     });
   }, []);
 
-  // REGRA RBAC: EQUIPE_INTERNA tem acesso a tudo, menos BACKUP
-  const isInternalStaffUser = currentUser.role === "EQUIPE_INTERNA";
-  const canAccessBackup = currentUser.role === "ADM";
+  // DEFINIÇÃO ESTRITA DE PERMISSÕES RBAC
+  const isAdmin = currentUser.role === "ADM";
+  const isReadOnlyStaff = currentUser.role !== "ADM";
+  const canAccessBackup = isAdmin;
+  const myPasswordDaysRemaining = getPasswordDaysRemaining(currentUser.passwordChangedAtIso);
 
   useEffect(() => {
     if (!canAccessBackup && activeTab === "BACKUP") {
@@ -228,10 +255,8 @@ export default function AdminPortalPage() {
     setEvDate(todayGmt3);
   };
 
-  // Eventos filtrados pelo mês selecionado (`selectedYearMonth`)
   const eventsInSelectedMonth = events.filter((e) => e.eventDate.slice(0, 7) === selectedYearMonth);
 
-  // Contadores de eventos por Status (no mês selecionado e no geral)
   const countMonthAll = eventsInSelectedMonth.length;
   const countMonthPending = eventsInSelectedMonth.filter((e) => e.status === "PENDENTE").length;
   const countMonthConfirmed = eventsInSelectedMonth.filter((e) => e.status === "CONFIRMADO").length;
@@ -246,9 +271,15 @@ export default function AdminPortalPage() {
   const phoneValidation = validateAnatelPhone(cadPhone);
   const cadPwCheck = validatePasswordRbac(cadPassword);
   const editPwCheck = validatePasswordRbac(editUserNewPassword);
+  const myPhoneCheck = validateAnatelPhone(myAccountPhone);
+  const myPwCheck = validatePasswordRbac(myNewPassword);
 
-  // Alternar confirmação de presença de um membro (interno ou externo) num evento e gravar no Supabase
+  // Alternar confirmação de presença: ADM pode alternar qualquer pessoa; Equipe pode confirmar apenas a própria presença
   const handleToggleStaffPresenceOnEvent = (eventId: string, memberName: string) => {
+    if (isReadOnlyStaff && memberName.trim().toLowerCase() !== currentUser.name.trim().toLowerCase()) {
+      return;
+    }
+
     const updated = events.map((ev) => {
       if (ev.id !== eventId) return ev;
       const currentConfirmed = ev.confirmedStaff || [];
@@ -273,7 +304,7 @@ export default function AdminPortalPage() {
     saveEventsToStorage(updated);
     setFeedback({
       type: "success",
-      text: `✓ Status de presença de "${memberName}" atualizado na escala e salvo no Supabase!`,
+      text: `✓ Presença de "${memberName}" atualizada na escala e salva no Supabase!`,
     });
   };
 
@@ -313,8 +344,92 @@ export default function AdminPortalPage() {
     saveClientsToStorage(syncedClients);
   };
 
+  // AUTOGESTÃO NA ABA "MINHA CONTA" — Salvar Dados Pessoais do próprio usuário logado
+  const handleSaveMyOwnProfile = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!myPhoneCheck.valid) {
+      setFeedback({ type: "error", text: `Erro ANATEL: ${myPhoneCheck.error}` });
+      return;
+    }
+
+    const normalizedEmail = myAccountEmail.trim().toLowerCase();
+    const emailConflict = users.some(
+      (u) => u.id !== currentUser.id && u.email.toLowerCase() === normalizedEmail
+    );
+    if (emailConflict) {
+      setFeedback({ type: "error", text: "Este e-mail já está em uso por outra conta no sistema." });
+      return;
+    }
+
+    const formattedPhone = myPhoneCheck.formatted || myAccountPhone;
+    const updatedMe: UserAccount = {
+      ...currentUser,
+      name: myAccountName.trim(),
+      email: normalizedEmail,
+      phoneAnatel: formattedPhone,
+      specialty: myAccountSpecialty.trim() || currentUser.specialty,
+    };
+
+    const existsInUsers = users.some((u) => u.id === currentUser.id);
+    const updatedUsers = existsInUsers
+      ? users.map((u) => (u.id === currentUser.id ? updatedMe : u))
+      : [updatedMe, ...users];
+
+    syncAllTablesFromUsers(updatedUsers);
+    setCurrentUser(updatedMe);
+    setCurrentUserSession(updatedMe);
+    setFeedback({
+      type: "success",
+      text: `✓ Seus dados pessoais foram atualizados e salvos no Supabase (${myPhoneCheck.regionUf})!`,
+    });
+  };
+
+  // AUTOGESTÃO NA ABA "MINHA CONTA" — Alterar a própria senha RBAC
+  const handleUpdateMyOwnPassword = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (myCurrentPassword !== currentUser.password) {
+      setFeedback({ type: "error", text: "A senha atual digitada está incorreta." });
+      return;
+    }
+    if (!myPwCheck.isValid) {
+      setFeedback({
+        type: "error",
+        text: "A nova senha precisa cumprir o padrão RBAC (mínimo de 8 caracteres, caractere especial, maiúscula, minúscula e número).",
+      });
+      return;
+    }
+    if (myNewPassword !== myConfirmPassword) {
+      setFeedback({ type: "error", text: "A confirmação da nova senha não confere." });
+      return;
+    }
+
+    const nowIso = new Date().toISOString();
+    const updatedMe: UserAccount = {
+      ...currentUser,
+      password: myNewPassword,
+      passwordChangedAtIso: nowIso,
+    };
+
+    const existsInUsers = users.some((u) => u.id === currentUser.id);
+    const updatedUsers = existsInUsers
+      ? users.map((u) => (u.id === currentUser.id ? updatedMe : u))
+      : [updatedMe, ...users];
+
+    syncAllTablesFromUsers(updatedUsers);
+    setCurrentUser(updatedMe);
+    setCurrentUserSession(updatedMe);
+    setMyCurrentPassword("");
+    setMyNewPassword("");
+    setMyConfirmPassword("");
+    setFeedback({
+      type: "success",
+      text: "✓ Sua senha RBAC foi atualizada no Supabase! Novo ciclo de validade: 90 dias.",
+    });
+  };
+
   const handleSaveCadastro = (e: React.FormEvent) => {
     e.preventDefault();
+    if (!isAdmin) return;
     if (!phoneValidation.valid) {
       setFeedback({ type: "error", text: `Erro ANATEL: ${phoneValidation.error}` });
       return;
@@ -389,6 +504,7 @@ export default function AdminPortalPage() {
   };
 
   const openEditUserModal = (u: UserAccount) => {
+    if (!isAdmin) return;
     setEditingUser(u);
     setEditUserName(u.name);
     setEditUserEmail(u.email);
@@ -402,7 +518,7 @@ export default function AdminPortalPage() {
 
   const handleSaveEditedUser = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!editingUser) return;
+    if (!isAdmin || !editingUser) return;
 
     const check = validateAnatelPhone(editUserPhone);
     if (!check.valid) {
@@ -448,6 +564,7 @@ export default function AdminPortalPage() {
   };
 
   const handleApproveAndSyncGcal = (id: string) => {
+    if (!isAdmin) return;
     const targetEv = events.find((ev) => ev.id === id);
     const updated = events.map((ev) =>
       ev.id === id
@@ -471,13 +588,12 @@ export default function AdminPortalPage() {
 
     setFeedback({
       type: "success",
-      text: `✓ Evento "${targetEv?.title || id}" confirmado e adicionado automaticamente na agenda de ${
-        targetEv ? formatYearMonthLabel(targetEv.eventDate.slice(0, 7)) : ""
-      }!`,
+      text: `✓ Evento "${targetEv?.title || id}" confirmado e adicionado automaticamente na agenda!`,
     });
   };
 
   const handleCancelEvent = (id: string) => {
+    if (!isAdmin) return;
     const updated = events.map((ev) => (ev.id === id ? { ...ev, status: "CANCELADO" as const } : ev));
     setEvents(updated);
     saveEventsToStorage(updated);
@@ -485,6 +601,7 @@ export default function AdminPortalPage() {
   };
 
   const openEventModal = (ev: EventRecord) => {
+    if (!isAdmin) return;
     setEditingEvent(ev);
     setModTitle(ev.title);
     setModCategory(ev.eventType);
@@ -502,7 +619,7 @@ export default function AdminPortalPage() {
 
   const handleSaveEventModal = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!editingEvent) return;
+    if (!isAdmin || !editingEvent) return;
     if (modEnd <= modStart) {
       setFeedback({ type: "error", text: "O horário final deve ser maior que o inicial." });
       return;
@@ -545,6 +662,7 @@ export default function AdminPortalPage() {
 
   const handleCreateManualEvent = (e: React.FormEvent) => {
     e.preventDefault();
+    if (!isAdmin) return;
     if (!evCategoryText.trim()) {
       setFeedback({ type: "error", text: "Digite a categoria do evento." });
       return;
@@ -603,9 +721,7 @@ export default function AdminPortalPage() {
     setSelectedCalendarDay(evDate);
     setFeedback({
       type: "success",
-      text: `✓ Evento "${newEv.title}" adicionado automaticamente na agenda de ${formatYearMonthLabel(
-        evDate.slice(0, 7)
-      )}!`,
+      text: `✓ Evento "${newEv.title}" adicionado automaticamente na agenda!`,
     });
   };
 
@@ -704,7 +820,6 @@ export default function AdminPortalPage() {
     return matchRole && matchQuery;
   });
 
-  // Filtra eventos da Gestão pelo Mês/Ano selecionado (ou dia clicado), Status e Busca
   const filteredEvents = events.filter((ev) => {
     const matchesMonth = ev.eventDate.slice(0, 7) === selectedYearMonth;
     const matchesStatus = statusFilter === "TODOS" || ev.status === statusFilter;
@@ -722,15 +837,15 @@ export default function AdminPortalPage() {
   const daysInMonth = new Date(calYear || 2026, calMonth || 11, 0).getDate();
   const firstWeekday = new Date(calYear || 2026, (calMonth || 11) - 1, 1).getDay();
 
-  // Abas visíveis conforme RBAC (Equipe Interna tem acesso a tudo, menos Backup)
+  // Menu lateral com a nova aba "MINHA_CONTA" visível para todos os utilizadores autenticados
   const visibleMenuTabs = [
     { id: "DASHBOARD", label: "Dashboard (Mensal)", icon: "⊞" },
-    { id: "EVENTOS", label: "Gestão de eventos", icon: "📅" },
-    { id: "CADASTROS", label: "Cadastros (RBAC)", icon: "👥" },
+    { id: "EVENTOS", label: isReadOnlyStaff ? "Agenda de eventos (Visão)" : "Gestão de eventos", icon: "📅" },
+    { id: "CADASTROS", label: isReadOnlyStaff ? "Pessoas (Visão)" : "Cadastros (RBAC)", icon: "👥" },
+    { id: "MINHA_CONTA", label: "Minha conta", icon: "👤" },
     ...(canAccessBackup ? [{ id: "BACKUP", label: "Backup e governança", icon: "🛡️" }] : []),
   ];
 
-  // Componente reutilizável de Barra de Navegação de Todos os Meses do Ano
   const renderMonthNavigationBar = () => (
     <div className="bg-[#111726] border border-slate-800/90 rounded-2xl p-3.5 flex flex-wrap items-center justify-between gap-3">
       <div className="flex items-center gap-2">
@@ -789,7 +904,7 @@ export default function AdminPortalPage() {
     </div>
   );
 
-  // Componente que renderiza os Emblemas de Confirmação da Equipe Interna e Externa
+  // Renderiza os badges de confirmação: ADM pode alternar todos; Equipe tem modo visualização + botão de confirmar a própria presença
   const renderStaffConfirmationBadges = (ev: EventRecord) => {
     const validTeam = (ev.supportTeam || []).filter(
       (m) => m !== "A definir pelo ADM" && m !== "Sem equipe escalada"
@@ -802,16 +917,22 @@ export default function AdminPortalPage() {
         <div className="flex flex-wrap items-center justify-between gap-2">
           <span className="text-[11px] font-bold text-slate-400">
             👥 Confirmação da Equipe (Interna/Externa):{" "}
-            <strong className={confirmedCount === validTeam.length && validTeam.length > 0 ? "text-emerald-400" : "text-amber-400"}>
+            <strong
+              className={
+                confirmedCount === validTeam.length && validTeam.length > 0
+                  ? "text-emerald-400"
+                  : "text-amber-400"
+              }
+            >
               {confirmedCount} de {validTeam.length} confirmado(s)
             </strong>
           </span>
 
-          {isInternalStaffUser && (
+          {isReadOnlyStaff && ev.status !== "CANCELADO" && (
             <button
               type="button"
               onClick={() => handleToggleStaffPresenceOnEvent(ev.id, currentUser.name)}
-              className={`text-[11px] font-bold px-2.5 py-1 rounded-lg border transition ${
+              className={`text-[11px] font-bold px-3 py-1 rounded-lg border transition ${
                 isCurrentUserConfirmed
                   ? "bg-emerald-500/20 text-emerald-300 border-emerald-500/40"
                   : "bg-amber-500 text-slate-950 border-amber-400"
@@ -823,9 +944,7 @@ export default function AdminPortalPage() {
         </div>
 
         {validTeam.length === 0 ? (
-          <p className="text-[11px] text-slate-500 italic">
-            Nenhum profissional escalado ainda. Clique em &quot;Editar escala&quot; para alocar a equipe.
-          </p>
+          <p className="text-[11px] text-slate-500 italic">Nenhum profissional escalado neste evento.</p>
         ) : (
           <div className="flex flex-wrap gap-1.5">
             {validTeam.map((memberName) => {
@@ -839,6 +958,25 @@ export default function AdminPortalPage() {
                   : staffObj?.staffType === "EXTERNA_TERCEIRO"
                   ? "Externa"
                   : "Equipe";
+
+              if (isReadOnlyStaff) {
+                return (
+                  <span
+                    key={memberName}
+                    className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11px] font-semibold border ${
+                      confirmed
+                        ? "bg-emerald-500/15 text-emerald-300 border-emerald-500/40"
+                        : "bg-orange-500/15 text-orange-300 border-orange-500/40"
+                    }`}
+                  >
+                    <span>{confirmed ? "✓" : "⏳"}</span>
+                    <span>{memberName}</span>
+                    <span className="opacity-75 text-[10px]">
+                      ({typeTag} · {confirmed ? "Confirmado" : "Aguardando"})
+                    </span>
+                  </span>
+                );
+              }
 
               return (
                 <button
@@ -854,7 +992,9 @@ export default function AdminPortalPage() {
                 >
                   <span>{confirmed ? "✓" : "⏳"}</span>
                   <span>{memberName}</span>
-                  <span className="opacity-75 text-[10px]">({typeTag} · {confirmed ? "Confirmado" : "Aguardando"})</span>
+                  <span className="opacity-75 text-[10px]">
+                    ({typeTag} · {confirmed ? "Confirmado" : "Aguardando"})
+                  </span>
                 </button>
               );
             })}
@@ -882,7 +1022,7 @@ export default function AdminPortalPage() {
 
           <div className="space-y-1.5">
             <p className="px-3 text-[10px] font-bold tracking-[0.16em] text-slate-500 uppercase mb-2">
-              {isInternalStaffUser ? "PAINEL EQUIPE INTERNA" : "PAINEL DA FAMÍLIA (ADM)"}
+              {isReadOnlyStaff ? "VISÃO DO ESPAÇO (EQUIPE)" : "PAINEL DA FAMÍLIA (ADM)"}
             </p>
             {visibleMenuTabs.map((item) => (
               <button
@@ -908,9 +1048,9 @@ export default function AdminPortalPage() {
             </span>
             <p className="text-xs font-bold text-white">Supabase & Google Calendar</p>
             <p className="text-[11px] text-slate-400">
-              {isInternalStaffUser
-                ? "Acesso completo de gestão (Exceto Backup)."
-                : "Acesso total Administrador."}
+              {isReadOnlyStaff
+                ? "Modo visualização do local + Minha conta."
+                : "Acesso total de Administrador."}
             </p>
           </div>
 
@@ -922,7 +1062,7 @@ export default function AdminPortalPage() {
               <div className="leading-tight truncate">
                 <p className="text-xs font-bold text-white truncate">{currentUser.name}</p>
                 <p className="text-[11px] text-amber-400">
-                  {isInternalStaffUser ? "🏠 Equipe Interna" : "🛡️ Perfil ADM"}
+                  {isReadOnlyStaff ? "👁️ Equipe (Modo Visão)" : "🛡️ Perfil ADM"}
                 </p>
               </div>
             </div>
@@ -945,28 +1085,42 @@ export default function AdminPortalPage() {
         <header className="border-b border-slate-800/80 px-6 py-5 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
           <div>
             <p className="text-[10px] font-bold tracking-[0.18em] text-amber-500 uppercase">
-              {isInternalStaffUser
-                ? "GESTÃO OPERACIONAL · EQUIPE INTERNA"
+              {isReadOnlyStaff
+                ? "MODO SOMENTE VISUALIZAÇÃO · EQUIPE DO ESPAÇO"
                 : "ADMINISTRAÇÃO DO ESPAÇO · SUPABASE CLOUD"}
             </p>
             <h1 className="text-2xl sm:text-3xl font-extrabold text-white mt-0.5">
               {activeTab === "DASHBOARD" && `Dashboard — ${formatYearMonthLabel(selectedYearMonth)}`}
-              {activeTab === "EVENTOS" && `Gestão de eventos — ${formatYearMonthLabel(selectedYearMonth)}`}
-              {activeTab === "CADASTROS" && "Cadastros por Perfil RBAC"}
+              {activeTab === "EVENTOS" &&
+                `${isReadOnlyStaff ? "Agenda de eventos" : "Gestão de eventos"} — ${formatYearMonthLabel(
+                  selectedYearMonth
+                )}`}
+              {activeTab === "CADASTROS" &&
+                (isReadOnlyStaff ? "Consulta de Pessoas Cadastradas" : "Cadastros por Perfil RBAC")}
+              {activeTab === "MINHA_CONTA" && "Minha conta"}
               {activeTab === "BACKUP" && canAccessBackup && "Backup e governança"}
             </h1>
             <p className="text-xs text-slate-400 mt-0.5">
               {activeTab === "DASHBOARD" &&
-                "Navegue por todos os meses do ano e acompanhe a confirmação da equipe interna e externa."}
+                (isReadOnlyStaff
+                  ? "Consulte a programação mensal do espaço e confirme a sua presença nos eventos."
+                  : "Navegue por todos os meses do ano e acompanhe a confirmação da equipe interna e externa.")}
               {activeTab === "EVENTOS" &&
-                "Clique no badge de qualquer membro escalado para confirmar/alternar a presença na escala."}
+                (isReadOnlyStaff
+                  ? "Visualização completa do calendário anual e dos detalhes de cada evento."
+                  : "Clique no badge de qualquer membro escalado para confirmar/alternar a presença na escala.")}
               {activeTab === "CADASTROS" &&
-                "Qualquer conta criada aqui é gravada no Supabase e já pode fazer login imediatamente."}
+                (isReadOnlyStaff
+                  ? "Visualização de contatos da equipe e clientes (edição restrita ao Administrador)."
+                  : "Qualquer conta criada aqui é gravada no Supabase e já pode fazer login imediatamente.")}
+              {activeTab === "MINHA_CONTA" &&
+                "Atualize os seus dados pessoais, telefone ANATEL e senha RBAC diretamente no Supabase."}
               {activeTab === "BACKUP" && "Exportação segura, exclusão de último backup e reset."}
             </p>
           </div>
 
-          {(activeTab === "DASHBOARD" || activeTab === "EVENTOS") && (
+          {/* BOTÃO "+ NOVO AGENDAMENTO RÁPIDO" VISÍVEL APENAS PARA ADM */}
+          {isAdmin && (activeTab === "DASHBOARD" || activeTab === "EVENTOS") && (
             <button
               type="button"
               onClick={() => setShowNewEventModal(true)}
@@ -975,7 +1129,31 @@ export default function AdminPortalPage() {
               + Novo agendamento rápido
             </button>
           )}
+
+          {activeTab === "MINHA_CONTA" && (
+            <div className="px-3.5 py-2 rounded-full bg-emerald-950/50 border border-emerald-500/30 text-emerald-400 text-xs font-semibold shrink-0">
+              ✓ Senha válida por mais {myPasswordDaysRemaining} dias
+            </div>
+          )}
         </header>
+
+        {/* AVISO DE MODO SOMENTE VISUALIZAÇÃO PARA A EQUIPE */}
+        {isReadOnlyStaff && activeTab !== "MINHA_CONTA" && (
+          <div className="mx-6 mt-5 px-4 py-3 rounded-2xl bg-sky-950/40 border border-sky-500/30 text-sky-200 text-xs flex flex-wrap items-center justify-between gap-2">
+            <span>
+              👁️ <strong>Modo Visualização:</strong> Você pode consultar toda a agenda e os cadastros do espaço e
+              confirmar a sua presença na escala. Para alterar seus dados ou senha, acesse a aba{" "}
+              <strong>Minha conta</strong>.
+            </span>
+            <button
+              type="button"
+              onClick={() => setActiveTab("MINHA_CONTA")}
+              className="text-amber-400 hover:underline font-bold shrink-0"
+            >
+              Ir para Minha conta →
+            </button>
+          </div>
+        )}
 
         {feedback && (
           <div
@@ -993,7 +1171,7 @@ export default function AdminPortalPage() {
         )}
 
         <main className="p-6 space-y-6 flex-1">
-          {/* ABA 1: DASHBOARD MENSAL COM NAVEGAÇÃO POR TODOS OS MESES E CONFIRMAÇÃO DA EQUIPE */}
+          {/* ABA 1: DASHBOARD MENSAL */}
           {activeTab === "DASHBOARD" && (
             <div className="space-y-6">
               {renderMonthNavigationBar()}
@@ -1078,7 +1256,9 @@ export default function AdminPortalPage() {
                         Agenda de {formatYearMonthLabel(selectedYearMonth)}
                       </h2>
                       <p className="text-xs text-slate-400">
-                        Veja o status de confirmação de cada membro da equipe interna e externa
+                        {isReadOnlyStaff
+                          ? "Visualização dos eventos do mês e confirmação da sua presença"
+                          : "Veja o status de confirmação de cada membro da equipe interna e externa"}
                       </p>
                     </div>
                     <span className="text-xs bg-[#0A0E17] border border-slate-800 px-3 py-1 rounded-full text-amber-400 font-semibold">
@@ -1092,7 +1272,7 @@ export default function AdminPortalPage() {
                         Nenhum evento programado para {formatYearMonthLabel(selectedYearMonth)}.
                       </p>
                       <p className="text-xs text-slate-500">
-                        Use o seletor de meses acima para navegar pelo ano ou clique em &quot;+ Novo agendamento rápido&quot;.
+                        Use o seletor de meses acima para consultar outros períodos do ano.
                       </p>
                     </div>
                   ) : (
@@ -1100,8 +1280,10 @@ export default function AdminPortalPage() {
                       {eventsInSelectedMonth.map((ev) => (
                         <div
                           key={ev.id}
-                          onClick={() => openEventModal(ev)}
-                          className="cursor-pointer bg-[#0A0E17] hover:bg-[#131B2E] border border-slate-800/90 hover:border-amber-500/40 rounded-2xl p-4 flex flex-col sm:flex-row justify-between gap-4 transition"
+                          onClick={() => isAdmin && openEventModal(ev)}
+                          className={`${
+                            isAdmin ? "cursor-pointer hover:bg-[#131B2E] hover:border-amber-500/40" : ""
+                          } bg-[#0A0E17] border border-slate-800/90 rounded-2xl p-4 flex flex-col sm:flex-row justify-between gap-4 transition`}
                         >
                           <div className="flex gap-4 flex-1">
                             <div className="text-xs font-mono text-slate-300 border-r border-slate-800 pr-4 flex flex-col justify-center shrink-0">
@@ -1130,36 +1312,49 @@ export default function AdminPortalPage() {
                                 ADM: <strong className="text-slate-300">{ev.responsibleAdmin}</strong>
                               </p>
 
-                              {/* EXIBIÇÃO DA CONFIRMAÇÃO DA EQUIPE INTERNA E EXTERNA */}
                               {renderStaffConfirmationBadges(ev)}
                             </div>
                           </div>
 
+                          {/* BOTÕES DE EDIÇÃO/APROVAÇÃO VISÍVEIS APENAS PARA ADM */}
                           <div
                             className="flex sm:flex-col justify-end gap-2 shrink-0"
                             onClick={(e) => e.stopPropagation()}
                           >
-                            {ev.status === "PENDENTE" && (
-                              <button
-                                onClick={() => handleApproveAndSyncGcal(ev.id)}
-                                className="bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-xs px-3.5 py-2 rounded-xl"
+                            {isAdmin ? (
+                              <>
+                                {ev.status === "PENDENTE" && (
+                                  <button
+                                    onClick={() => handleApproveAndSyncGcal(ev.id)}
+                                    className="bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-xs px-3.5 py-2 rounded-xl"
+                                  >
+                                    ✓ Aprovar na Agenda
+                                  </button>
+                                )}
+                                <button
+                                  onClick={() => openEventModal(ev)}
+                                  className="bg-[#111726] hover:bg-slate-800 text-amber-400 border border-amber-500/30 text-xs font-semibold px-3 py-1.5 rounded-xl"
+                                >
+                                  Editar escala
+                                </button>
+                                {ev.status !== "CANCELADO" && (
+                                  <button
+                                    onClick={() => handleCancelEvent(ev.id)}
+                                    className="text-xs text-red-400 hover:text-red-300 px-2 py-1"
+                                  >
+                                    Cancelar
+                                  </button>
+                                )}
+                              </>
+                            ) : (
+                              <a
+                                href={generateGoogleCalendarUrl(ev)}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-300 border border-emerald-500/30 text-xs font-semibold px-3 py-2 rounded-xl text-center"
                               >
-                                ✓ Aprovar na Agenda
-                              </button>
-                            )}
-                            <button
-                              onClick={() => openEventModal(ev)}
-                              className="bg-[#111726] hover:bg-slate-800 text-amber-400 border border-amber-500/30 text-xs font-semibold px-3 py-1.5 rounded-xl"
-                            >
-                              Editar escala
-                            </button>
-                            {ev.status !== "CANCELADO" && (
-                              <button
-                                onClick={() => handleCancelEvent(ev.id)}
-                                className="text-xs text-red-400 hover:text-red-300 px-2 py-1"
-                              >
-                                Cancelar
-                              </button>
+                                📅 GCal
+                              </a>
                             )}
                           </div>
                         </div>
@@ -1177,13 +1372,15 @@ export default function AdminPortalPage() {
                       </span>
                     </div>
                     {pendingEvents.length === 0 ? (
-                      <p className="text-xs text-slate-500">Nenhuma solicitação pendente de aprovação.</p>
+                      <p className="text-xs text-slate-500">Nenhuma solicitação pendente no momento.</p>
                     ) : (
                       pendingEvents.map((pe) => (
                         <div
                           key={pe.id}
-                          onClick={() => openEventModal(pe)}
-                          className="cursor-pointer bg-[#0A0E17] hover:bg-[#141C2E] border border-orange-500/30 rounded-xl p-3 flex items-center justify-between transition"
+                          onClick={() => isAdmin && openEventModal(pe)}
+                          className={`${
+                            isAdmin ? "cursor-pointer hover:bg-[#141C2E]" : ""
+                          } bg-[#0A0E17] border border-orange-500/30 rounded-xl p-3 flex items-center justify-between transition`}
                         >
                           <div>
                             <p className="text-xs font-bold text-white">{pe.title}</p>
@@ -1191,15 +1388,19 @@ export default function AdminPortalPage() {
                               {pe.eventDate} · {pe.honoreeName}
                             </p>
                           </div>
-                          <button
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              handleApproveAndSyncGcal(pe.id);
-                            }}
-                            className="text-xs bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 px-2.5 py-1 rounded-lg font-bold"
-                          >
-                            ✓ Aprovar
-                          </button>
+                          {isAdmin ? (
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                handleApproveAndSyncGcal(pe.id);
+                              }}
+                              className="text-xs bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 px-2.5 py-1 rounded-lg font-bold"
+                            >
+                              ✓ Aprovar
+                            </button>
+                          ) : (
+                            <span className="text-[10px] font-bold text-orange-400">Aguardando ADM</span>
+                          )}
                         </div>
                       ))
                     )}
@@ -1209,7 +1410,7 @@ export default function AdminPortalPage() {
             </div>
           )}
 
-          {/* ABA 2: GESTÃO DE EVENTOS — NAVEGAÇÃO POR TODOS OS MESES + CONFIRMAÇÃO DA EQUIPE */}
+          {/* ABA 2: GESTÃO DE EVENTOS (MODO VISUALIZAÇÃO PARA EQUIPE / CONTROLE TOTAL PARA ADM) */}
           {activeTab === "EVENTOS" && (
             <div className="w-full space-y-6">
               {renderMonthNavigationBar()}
@@ -1385,12 +1586,11 @@ export default function AdminPortalPage() {
                             <strong>{ev.honoreeName}</strong> · Cliente: {ev.clientName} · ADM: {ev.responsibleAdmin}
                           </p>
 
-                          {/* CONFIRMAÇÃO DA EQUIPE INTERNA E EXTERNA NA GESTÃO DE EVENTOS */}
                           {renderStaffConfirmationBadges(ev)}
                         </div>
 
                         <div className="flex flex-wrap items-center gap-2 shrink-0">
-                          {ev.status === "PENDENTE" && (
+                          {isAdmin && ev.status === "PENDENTE" && (
                             <button
                               onClick={() => handleApproveAndSyncGcal(ev.id)}
                               className="bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-extrabold text-xs px-3.5 py-2 rounded-xl transition shadow-md"
@@ -1398,12 +1598,14 @@ export default function AdminPortalPage() {
                               ✓ Aprovar evento
                             </button>
                           )}
-                          <button
-                            onClick={() => openEventModal(ev)}
-                            className="bg-[#192236] hover:bg-slate-800 text-amber-400 border border-amber-500/30 text-xs font-semibold px-3 py-2 rounded-xl"
-                          >
-                            ✏️ Editar dados & Escala
-                          </button>
+                          {isAdmin && (
+                            <button
+                              onClick={() => openEventModal(ev)}
+                              className="bg-[#192236] hover:bg-slate-800 text-amber-400 border border-amber-500/30 text-xs font-semibold px-3 py-2 rounded-xl"
+                            >
+                              ✏️ Editar dados & Escala
+                            </button>
+                          )}
                           <a
                             href={generateGoogleCalendarUrl(ev)}
                             target="_blank"
@@ -1412,7 +1614,7 @@ export default function AdminPortalPage() {
                           >
                             📅 GCal
                           </a>
-                          {ev.status !== "CANCELADO" && (
+                          {isAdmin && ev.status !== "CANCELADO" && (
                             <button
                               onClick={() => handleCancelEvent(ev.id)}
                               className="bg-red-950/60 hover:bg-red-900 text-red-200 border border-red-800/60 text-xs font-semibold px-3 py-2 rounded-xl"
@@ -1429,209 +1631,215 @@ export default function AdminPortalPage() {
             </div>
           )}
 
-          {/* ABA 3: CADASTROS COM 4 ABAS DE PERFIL RBAC */}
+          {/* ABA 3: CADASTROS (FORMULÁRIO E EDIÇÃO OCULTOS PARA A EQUIPE EM MODO VISUALIZAÇÃO) */}
           {activeTab === "CADASTROS" && (
             <div className="space-y-6">
-              <form
-                onSubmit={handleSaveCadastro}
-                className="w-full bg-[#111726] border border-slate-800/90 rounded-3xl p-6 space-y-5"
-              >
-                <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4 border-b border-slate-800 pb-4">
-                  <div>
-                    <h2 className="text-lg font-extrabold text-white">Adicionar uma pessoa (4 Perfis RBAC)</h2>
-                    <p className="text-xs text-slate-400">
-                      Selecione a aba do perfil abaixo. A conta é salva diretamente no Supabase.
-                    </p>
-                  </div>
-
-                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5 bg-[#0A0E17] p-1.5 rounded-2xl border border-slate-800">
-                    {[
-                      { id: "ADM", label: "🛡️ ADM" },
-                      { id: "EQUIPE_INTERNA", label: "🏠 Equipe Interna" },
-                      { id: "EQUIPE_EXTERNA", label: "👨‍🍳 Equipe Externa" },
-                      { id: "CLIENTE", label: "🙋‍♂️ Cliente" },
-                    ].map((tab) => (
-                      <button
-                        key={tab.id}
-                        type="button"
-                        onClick={() => setCadRole(tab.id as UserRole)}
-                        className={`py-2 px-3 rounded-xl text-xs font-bold transition ${
-                          cadRole === tab.id
-                            ? "bg-[#F59E0B] text-slate-950 shadow-md"
-                            : "text-slate-400 hover:text-white"
-                        }`}
-                      >
-                        {tab.label}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-
-                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-                  <div>
-                    <label className="block text-xs font-medium text-slate-300 mb-1">Nome completo *</label>
-                    <input
-                      type="text"
-                      required
-                      value={cadName}
-                      onChange={(e) => setCadName(e.target.value)}
-                      placeholder="Nome completo"
-                      className="w-full bg-[#0A0E17] border border-slate-800 rounded-xl px-3.5 py-2.5 text-xs text-white"
-                    />
-                  </div>
-
-                  <div>
-                    <label className="block text-xs font-medium text-slate-300 mb-1">E-mail de Login *</label>
-                    <input
-                      type="email"
-                      required
-                      value={cadEmail}
-                      onChange={(e) => setCadEmail(e.target.value)}
-                      placeholder="usuario@exemplo.com"
-                      className="w-full bg-[#0A0E17] border border-slate-800 rounded-xl px-3.5 py-2.5 text-xs text-white"
-                    />
-                  </div>
-
-                  <div>
-                    <div className="flex justify-between text-xs mb-1">
-                      <span className="text-slate-300 font-medium">Telefone ANATEL *</span>
-                      {phoneValidation.valid && (
-                        <span className="text-emerald-400 font-semibold">✓ {phoneValidation.regionUf}</span>
-                      )}
-                    </div>
-                    <input
-                      type="tel"
-                      required
-                      value={cadPhone}
-                      onChange={(e) => setCadPhone(applyAnatelPhoneMask(e.target.value))}
-                      placeholder="(11) 98765-4321"
-                      className="w-full bg-[#0A0E17] border border-slate-800 rounded-xl px-3.5 py-2.5 text-xs font-mono text-white"
-                    />
-                  </div>
-
-                  <div>
-                    <label className="block text-xs font-medium text-slate-300 mb-1">Status da Conta</label>
-                    <select
-                      value={cadStatus}
-                      onChange={(e) => setCadStatus(e.target.value as "ATIVO" | "INATIVO")}
-                      className="w-full bg-[#0A0E17] border border-slate-800 rounded-xl px-3.5 py-2.5 text-xs text-white"
-                    >
-                      <option value="ATIVO">🟢 Ativo (Pode logar)</option>
-                      <option value="INATIVO">🔴 Inativo (Bloqueado)</option>
-                    </select>
-                  </div>
-
-                  {cadRole === "ADM" && (
+              {isAdmin && (
+                <form
+                  onSubmit={handleSaveCadastro}
+                  className="w-full bg-[#111726] border border-slate-800/90 rounded-3xl p-6 space-y-5"
+                >
+                  <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4 border-b border-slate-800 pb-4">
                     <div>
-                      <label className="block text-xs font-medium text-slate-300 mb-1">Cargo / Papel Familiar</label>
-                      <input
-                        type="text"
-                        value={cadSpecialty}
-                        onChange={(e) => setCadSpecialty(e.target.value)}
-                        placeholder="Ex: Gestor Geral (Pai / Mãe)"
-                        className="w-full bg-[#0A0E17] border border-slate-800 rounded-xl px-3.5 py-2.5 text-xs text-white"
-                      />
+                      <h2 className="text-lg font-extrabold text-white">Adicionar uma pessoa (4 Perfis RBAC)</h2>
+                      <p className="text-xs text-slate-400">
+                        Selecione a aba do perfil abaixo. A conta é salva diretamente no Supabase.
+                      </p>
                     </div>
-                  )}
 
-                  {cadRole === "EQUIPE_INTERNA" && (
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5 bg-[#0A0E17] p-1.5 rounded-2xl border border-slate-800">
+                      {[
+                        { id: "ADM", label: "🛡️ ADM" },
+                        { id: "EQUIPE_INTERNA", label: "🏠 Equipe Interna" },
+                        { id: "EQUIPE_EXTERNA", label: "👨‍🍳 Equipe Externa" },
+                        { id: "CLIENTE", label: "🙋‍♂️ Cliente" },
+                      ].map((tab) => (
+                        <button
+                          key={tab.id}
+                          type="button"
+                          onClick={() => setCadRole(tab.id as UserRole)}
+                          className={`py-2 px-3 rounded-xl text-xs font-bold transition ${
+                            cadRole === tab.id
+                              ? "bg-[#F59E0B] text-slate-950 shadow-md"
+                              : "text-slate-400 hover:text-white"
+                          }`}
+                        >
+                          {tab.label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
                     <div>
-                      <label className="block text-xs font-medium text-slate-300 mb-1">Função Interna *</label>
+                      <label className="block text-xs font-medium text-slate-300 mb-1">Nome completo *</label>
                       <input
                         type="text"
                         required
-                        value={cadSpecialty}
-                        onChange={(e) => setCadSpecialty(e.target.value)}
-                        placeholder="Ex: Recepção, Organização, Limpeza"
+                        value={cadName}
+                        onChange={(e) => setCadName(e.target.value)}
+                        placeholder="Nome completo"
                         className="w-full bg-[#0A0E17] border border-slate-800 rounded-xl px-3.5 py-2.5 text-xs text-white"
                       />
                     </div>
-                  )}
 
-                  {cadRole === "EQUIPE_EXTERNA" && (
-                    <>
+                    <div>
+                      <label className="block text-xs font-medium text-slate-300 mb-1">E-mail de Login *</label>
+                      <input
+                        type="email"
+                        required
+                        value={cadEmail}
+                        onChange={(e) => setCadEmail(e.target.value)}
+                        placeholder="usuario@exemplo.com"
+                        className="w-full bg-[#0A0E17] border border-slate-800 rounded-xl px-3.5 py-2.5 text-xs text-white"
+                      />
+                    </div>
+
+                    <div>
+                      <div className="flex justify-between text-xs mb-1">
+                        <span className="text-slate-300 font-medium">Telefone ANATEL *</span>
+                        {phoneValidation.valid && (
+                          <span className="text-emerald-400 font-semibold">✓ {phoneValidation.regionUf}</span>
+                        )}
+                      </div>
+                      <input
+                        type="tel"
+                        required
+                        value={cadPhone}
+                        onChange={(e) => setCadPhone(applyAnatelPhoneMask(e.target.value))}
+                        placeholder="(11) 98765-4321"
+                        className="w-full bg-[#0A0E17] border border-slate-800 rounded-xl px-3.5 py-2.5 text-xs font-mono text-white"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="block text-xs font-medium text-slate-300 mb-1">Status da Conta</label>
+                      <select
+                        value={cadStatus}
+                        onChange={(e) => setCadStatus(e.target.value as "ATIVO" | "INATIVO")}
+                        className="w-full bg-[#0A0E17] border border-slate-800 rounded-xl px-3.5 py-2.5 text-xs text-white"
+                      >
+                        <option value="ATIVO">🟢 Ativo (Pode logar)</option>
+                        <option value="INATIVO">🔴 Inativo (Bloqueado)</option>
+                      </select>
+                    </div>
+
+                    {cadRole === "ADM" && (
                       <div>
-                        <label className="block text-xs font-medium text-slate-300 mb-1">Especialidade *</label>
+                        <label className="block text-xs font-medium text-slate-300 mb-1">Cargo / Papel Familiar</label>
+                        <input
+                          type="text"
+                          value={cadSpecialty}
+                          onChange={(e) => setCadSpecialty(e.target.value)}
+                          placeholder="Ex: Gestor Geral (Pai / Mãe)"
+                          className="w-full bg-[#0A0E17] border border-slate-800 rounded-xl px-3.5 py-2.5 text-xs text-white"
+                        />
+                      </div>
+                    )}
+
+                    {cadRole === "EQUIPE_INTERNA" && (
+                      <div>
+                        <label className="block text-xs font-medium text-slate-300 mb-1">Função Interna *</label>
                         <input
                           type="text"
                           required
                           value={cadSpecialty}
                           onChange={(e) => setCadSpecialty(e.target.value)}
-                          placeholder="Ex: Churrasqueiro, Garçom, Juiz"
+                          placeholder="Ex: Recepção, Organização, Limpeza"
                           className="w-full bg-[#0A0E17] border border-slate-800 rounded-xl px-3.5 py-2.5 text-xs text-white"
                         />
                       </div>
+                    )}
+
+                    {cadRole === "EQUIPE_EXTERNA" && (
+                      <>
+                        <div>
+                          <label className="block text-xs font-medium text-slate-300 mb-1">Especialidade *</label>
+                          <input
+                            type="text"
+                            required
+                            value={cadSpecialty}
+                            onChange={(e) => setCadSpecialty(e.target.value)}
+                            placeholder="Ex: Churrasqueiro, Garçom, Juiz"
+                            className="w-full bg-[#0A0E17] border border-slate-800 rounded-xl px-3.5 py-2.5 text-xs text-white"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-xs font-medium text-slate-300 mb-1">Empresa / MEI</label>
+                          <input
+                            type="text"
+                            value={cadCompany}
+                            onChange={(e) => setCadCompany(e.target.value)}
+                            placeholder="Ex: Paulo Grill MEI"
+                            className="w-full bg-[#0A0E17] border border-slate-800 rounded-xl px-3.5 py-2.5 text-xs text-white"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-xs font-medium text-slate-300 mb-1">Valor da Diária (R$)</label>
+                          <input
+                            type="number"
+                            value={cadRate}
+                            onChange={(e) => setCadRate(e.target.value)}
+                            className="w-full bg-[#0A0E17] border border-slate-800 rounded-xl px-3.5 py-2.5 text-xs text-white"
+                          />
+                        </div>
+                      </>
+                    )}
+
+                    {cadRole === "CLIENTE" && (
                       <div>
-                        <label className="block text-xs font-medium text-slate-300 mb-1">Empresa / MEI</label>
+                        <label className="block text-xs font-medium text-slate-300 mb-1">CPF / CNPJ (Opcional)</label>
                         <input
                           type="text"
-                          value={cadCompany}
-                          onChange={(e) => setCadCompany(e.target.value)}
-                          placeholder="Ex: Paulo Grill MEI"
+                          value={cadCpfCnpj}
+                          onChange={(e) => setCadCpfCnpj(e.target.value)}
+                          placeholder="000.000.000-00"
                           className="w-full bg-[#0A0E17] border border-slate-800 rounded-xl px-3.5 py-2.5 text-xs text-white"
                         />
                       </div>
-                      <div>
-                        <label className="block text-xs font-medium text-slate-300 mb-1">Valor da Diária (R$)</label>
-                        <input
-                          type="number"
-                          value={cadRate}
-                          onChange={(e) => setCadRate(e.target.value)}
-                          className="w-full bg-[#0A0E17] border border-slate-800 rounded-xl px-3.5 py-2.5 text-xs text-white"
-                        />
-                      </div>
-                    </>
-                  )}
+                    )}
 
-                  {cadRole === "CLIENTE" && (
-                    <div>
-                      <label className="block text-xs font-medium text-slate-300 mb-1">CPF / CNPJ (Opcional)</label>
+                    <div className="sm:col-span-2">
+                      <label className="block text-xs font-medium text-slate-300 mb-1">
+                        Senha de Login (Obrigatório RBAC: mín. 8 caracteres + especial) *
+                      </label>
                       <input
                         type="text"
-                        value={cadCpfCnpj}
-                        onChange={(e) => setCadCpfCnpj(e.target.value)}
-                        placeholder="000.000.000-00"
-                        className="w-full bg-[#0A0E17] border border-slate-800 rounded-xl px-3.5 py-2.5 text-xs text-white"
+                        required
+                        value={cadPassword}
+                        onChange={(e) => setCadPassword(e.target.value)}
+                        placeholder="Ex: Equipe@2026 ou Cliente@2026"
+                        className="w-full bg-[#0A0E17] border border-slate-800 rounded-xl px-3.5 py-2.5 text-xs font-mono text-white"
                       />
-                    </div>
-                  )}
-
-                  <div className="sm:col-span-2">
-                    <label className="block text-xs font-medium text-slate-300 mb-1">
-                      Senha de Login (Obrigatório RBAC: mín. 8 caracteres + especial) *
-                    </label>
-                    <input
-                      type="text"
-                      required
-                      value={cadPassword}
-                      onChange={(e) => setCadPassword(e.target.value)}
-                      placeholder="Ex: Equipe@2026 ou Cliente@2026"
-                      className="w-full bg-[#0A0E17] border border-slate-800 rounded-xl px-3.5 py-2.5 text-xs font-mono text-white"
-                    />
-                    <div className="flex flex-wrap gap-3 mt-1.5 text-[11px]">
-                      <span className={cadPwCheck.minLength ? "text-emerald-400 font-bold" : "text-slate-500"}>
-                        ✓ Tamanho mínimo (8+ chars)
-                      </span>
-                      <span className={cadPwCheck.hasSpecial ? "text-emerald-400 font-bold" : "text-slate-500"}>
-                        ✓ Caractere especial (!@#$)
-                      </span>
-                      <span className={cadPwCheck.hasUpper && cadPwCheck.hasLower ? "text-emerald-400" : "text-slate-500"}>
-                        ✓ Maiúscula e minúscula
-                      </span>
-                      <span className={cadPwCheck.hasNumber ? "text-emerald-400" : "text-slate-500"}>✓ Número</span>
+                      <div className="flex flex-wrap gap-3 mt-1.5 text-[11px]">
+                        <span className={cadPwCheck.minLength ? "text-emerald-400 font-bold" : "text-slate-500"}>
+                          ✓ Tamanho mínimo (8+ chars)
+                        </span>
+                        <span className={cadPwCheck.hasSpecial ? "text-emerald-400 font-bold" : "text-slate-500"}>
+                          ✓ Caractere especial (!@#$)
+                        </span>
+                        <span
+                          className={
+                            cadPwCheck.hasUpper && cadPwCheck.hasLower ? "text-emerald-400" : "text-slate-500"
+                          }
+                        >
+                          ✓ Maiúscula e minúscula
+                        </span>
+                        <span className={cadPwCheck.hasNumber ? "text-emerald-400" : "text-slate-500"}>✓ Número</span>
+                      </div>
                     </div>
                   </div>
-                </div>
 
-                <div className="flex justify-end pt-2">
-                  <button
-                    type="submit"
-                    className="w-full sm:w-auto bg-[#F59E0B] hover:bg-amber-400 text-slate-950 font-bold py-3 px-8 rounded-2xl text-xs transition"
-                  >
-                    + Criar Conta no Supabase ({cadRole})
-                  </button>
-                </div>
-              </form>
+                  <div className="flex justify-end pt-2">
+                    <button
+                      type="submit"
+                      className="w-full sm:w-auto bg-[#F59E0B] hover:bg-amber-400 text-slate-950 font-bold py-3 px-8 rounded-2xl text-xs transition"
+                    >
+                      + Criar Conta no Supabase ({cadRole})
+                    </button>
+                  </div>
+                </form>
+              )}
 
               <div className="w-full bg-[#111726] border border-slate-800/90 rounded-3xl p-6 space-y-5">
                 <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
@@ -1685,7 +1893,7 @@ export default function AdminPortalPage() {
                         <th className="py-3 px-3">ESPECIALIDADE / DIÁRIA</th>
                         <th className="py-3 px-3">STATUS</th>
                         <th className="py-3 px-3">ÚLTIMA ATUALIZAÇÃO DE SENHA</th>
-                        <th className="py-3 px-3 text-right">AÇÕES</th>
+                        {isAdmin && <th className="py-3 px-3 text-right">AÇÕES</th>}
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-800/60">
@@ -1724,15 +1932,17 @@ export default function AdminPortalPage() {
                           <td className="py-3.5 px-3 font-mono text-slate-300">
                             {formatIsoDatePtBr(u.passwordChangedAtIso)}
                           </td>
-                          <td className="py-3.5 px-3 text-right">
-                            <button
-                              type="button"
-                              onClick={() => openEditUserModal(u)}
-                              className="bg-[#192236] hover:bg-slate-800 text-amber-400 border border-amber-500/30 font-bold px-3 py-1.5 rounded-xl text-xs transition"
-                            >
-                              ✏️ Editar
-                            </button>
-                          </td>
+                          {isAdmin && (
+                            <td className="py-3.5 px-3 text-right">
+                              <button
+                                type="button"
+                                onClick={() => openEditUserModal(u)}
+                                className="bg-[#192236] hover:bg-slate-800 text-amber-400 border border-amber-500/30 font-bold px-3 py-1.5 rounded-xl text-xs transition"
+                              >
+                                ✏️ Editar
+                              </button>
+                            </td>
+                          )}
                         </tr>
                       ))}
                     </tbody>
@@ -1742,7 +1952,163 @@ export default function AdminPortalPage() {
             </div>
           )}
 
-          {/* ABA 4: BACKUP (EXCLUSIVA PARA PERFIL ADM — BLOQUEADA PARA EQUIPE INTERNA) */}
+          {/* ABA 4: MINHA CONTA (AUTOGESTÃO DO PRÓPRIO PERFIL E SENHA RBAC NO SUPABASE) */}
+          {activeTab === "MINHA_CONTA" && (
+            <div className="grid grid-cols-1 xl:grid-cols-12 gap-6 items-start">
+              <form
+                onSubmit={handleSaveMyOwnProfile}
+                className="xl:col-span-6 bg-[#111726] border border-slate-800/90 rounded-3xl p-6 space-y-4"
+              >
+                <div className="flex items-center justify-between border-b border-slate-800 pb-4">
+                  <div>
+                    <h2 className="text-lg font-extrabold text-white">Meus Dados Pessoais</h2>
+                    <p className="text-xs text-slate-400">
+                      Edite as informações da sua própria conta ({currentUser.role}).
+                    </p>
+                  </div>
+                  <span className="text-xs font-mono bg-[#0A0E17] border border-slate-800 px-3 py-1.5 rounded-xl text-amber-400 font-bold">
+                    ID #{currentUser.id}
+                  </span>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-medium text-slate-300 mb-1.5">Nome completo *</label>
+                  <input
+                    type="text"
+                    required
+                    value={myAccountName}
+                    onChange={(e) => setMyAccountName(e.target.value)}
+                    className="w-full bg-[#0A0E17] border border-slate-800 rounded-xl px-3.5 py-3 text-xs text-white"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-medium text-slate-300 mb-1.5">E-mail de Login *</label>
+                  <input
+                    type="email"
+                    required
+                    value={myAccountEmail}
+                    onChange={(e) => setMyAccountEmail(e.target.value)}
+                    className="w-full bg-[#0A0E17] border border-slate-800 rounded-xl px-3.5 py-3 text-xs text-white"
+                  />
+                </div>
+
+                <div>
+                  <div className="flex justify-between text-xs mb-1.5">
+                    <span className="text-slate-300 font-medium">Telefone ANATEL *</span>
+                    {myPhoneCheck.valid && (
+                      <span className="text-emerald-400 font-semibold">
+                        ✓ {myPhoneCheck.regionUf?.replace(" - ", " · ")} · DDD válido
+                      </span>
+                    )}
+                  </div>
+                  <input
+                    type="tel"
+                    required
+                    value={myAccountPhone}
+                    onChange={(e) => setMyAccountPhone(applyAnatelPhoneMask(e.target.value))}
+                    className="w-full bg-[#0A0E17] border border-slate-800 rounded-xl px-3.5 py-3 text-xs font-mono text-white"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-medium text-slate-300 mb-1.5">
+                    Minha Função / Especialidade
+                  </label>
+                  <input
+                    type="text"
+                    value={myAccountSpecialty}
+                    onChange={(e) => setMyAccountSpecialty(e.target.value)}
+                    placeholder="Ex: Apoio Operacional, Recepção, Gestão..."
+                    className="w-full bg-[#0A0E17] border border-slate-800 rounded-xl px-3.5 py-3 text-xs text-white"
+                  />
+                </div>
+
+                <button
+                  type="submit"
+                  className="w-full bg-[#F59E0B] hover:bg-amber-400 text-slate-950 font-extrabold py-3.5 rounded-2xl text-xs transition"
+                >
+                  Salvar meus dados no Supabase
+                </button>
+              </form>
+
+              <form
+                onSubmit={handleUpdateMyOwnPassword}
+                className="xl:col-span-6 bg-[#111726] border border-slate-800/90 rounded-3xl p-6 space-y-4"
+              >
+                <div className="border-b border-slate-800 pb-4">
+                  <h2 className="text-lg font-extrabold text-white">Alterar Minha Senha RBAC</h2>
+                  <p className="text-xs text-slate-400">
+                    Mínimo de 8 caracteres, caractere especial, letra maiúscula, minúscula e número.
+                  </p>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-medium text-slate-300 mb-1.5">Senha atual *</label>
+                  <input
+                    type="password"
+                    required
+                    value={myCurrentPassword}
+                    onChange={(e) => setMyCurrentPassword(e.target.value)}
+                    placeholder="Digite sua senha atual"
+                    className="w-full bg-[#0A0E17] border border-slate-800 rounded-xl px-3.5 py-3 text-xs text-white"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-medium text-slate-300 mb-1.5">Nova senha RBAC *</label>
+                  <input
+                    type="password"
+                    required
+                    value={myNewPassword}
+                    onChange={(e) => setMyNewPassword(e.target.value)}
+                    placeholder="Digite a nova senha"
+                    className="w-full bg-[#0A0E17] border border-slate-800 rounded-xl px-3.5 py-3 text-xs text-white"
+                  />
+                </div>
+
+                <div className="grid grid-cols-2 gap-2 text-xs bg-[#0A0E17] border border-slate-800 p-3.5 rounded-2xl">
+                  <span className={myPwCheck.minLength ? "text-emerald-400 font-bold" : "text-slate-500"}>
+                    ✓ Mínimo de 8 caracteres
+                  </span>
+                  <span className={myPwCheck.hasSpecial ? "text-emerald-400 font-bold" : "text-slate-500"}>
+                    ✓ 1 caractere especial (!@#$)
+                  </span>
+                  <span
+                    className={
+                      myPwCheck.hasUpper && myPwCheck.hasLower ? "text-emerald-400 font-bold" : "text-slate-500"
+                    }
+                  >
+                    ✓ Maiúscula e minúscula
+                  </span>
+                  <span className={myPwCheck.hasNumber ? "text-emerald-400 font-bold" : "text-slate-500"}>
+                    ✓ Pelo menos 1 número
+                  </span>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-medium text-slate-300 mb-1.5">Confirme a nova senha *</label>
+                  <input
+                    type="password"
+                    required
+                    value={myConfirmPassword}
+                    onChange={(e) => setMyConfirmPassword(e.target.value)}
+                    placeholder="Repita a nova senha"
+                    className="w-full bg-[#0A0E17] border border-slate-800 rounded-xl px-3.5 py-3 text-xs text-white"
+                  />
+                </div>
+
+                <button
+                  type="submit"
+                  className="w-full bg-[#192236] hover:bg-slate-800 text-amber-400 border border-amber-500/30 font-extrabold py-3.5 rounded-2xl text-xs transition"
+                >
+                  Atualizar minha senha no Supabase
+                </button>
+              </form>
+            </div>
+          )}
+
+          {/* ABA 5: BACKUP (EXCLUSIVA PARA PERFIL ADM) */}
           {activeTab === "BACKUP" && canAccessBackup && (
             <div className="space-y-6">
               <div className="grid grid-cols-1 md:grid-cols-3 gap-5">
@@ -1825,8 +2191,8 @@ export default function AdminPortalPage() {
         </main>
       </div>
 
-      {/* MODAL DE "NOVO AGENDAMENTO RÁPIDO" */}
-      {showNewEventModal && (
+      {/* MODAL DE "NOVO AGENDAMENTO RÁPIDO" (RENDERIZADO APENAS PARA ADM) */}
+      {isAdmin && showNewEventModal && (
         <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-sm flex items-center justify-center p-4">
           <form
             onSubmit={handleCreateManualEvent}
@@ -1899,7 +2265,7 @@ export default function AdminPortalPage() {
                 />
               </div>
               <div>
-                <label className="block text-slate-300 mb-1">Responsável ADM / Interno</label>
+                <label className="block text-slate-300 mb-1">Responsável ADM</label>
                 <input
                   type="text"
                   required
@@ -1990,8 +2356,8 @@ export default function AdminPortalPage() {
         </div>
       )}
 
-      {/* MODAL DE EDIÇÃO DE CONTA CADASTRADA */}
-      {editingUser && (
+      {/* MODAL DE EDIÇÃO DE CONTA DE TERCEIROS (APENAS ADM) */}
+      {isAdmin && editingUser && (
         <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-sm flex items-center justify-center p-4">
           <form
             onSubmit={handleSaveEditedUser}
@@ -2103,8 +2469,8 @@ export default function AdminPortalPage() {
         </div>
       )}
 
-      {/* MODAL DE EDIÇÃO DE EVENTO, ESCALA E CONFIRMAÇÃO DE PRESENÇA DA EQUIPE */}
-      {editingEvent && (
+      {/* MODAL DE EDIÇÃO DE EVENTO, ESCALA E CONFIRMAÇÃO DE PRESENÇA (APENAS ADM) */}
+      {isAdmin && editingEvent && (
         <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-sm flex items-center justify-center p-4">
           <form
             onSubmit={handleSaveEventModal}
