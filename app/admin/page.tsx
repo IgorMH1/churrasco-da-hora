@@ -24,35 +24,33 @@ import {
 
 type AdminTab = "DASHBOARD" | "EVENTOS" | "CADASTROS" | "BACKUP";
 
-function isDateInCurrentWeek(dateStr: string, todayStr: string): boolean {
+// CARD #28: Verifica se o evento pertence ao mês atual (AAAA-MM)
+function isDateInCurrentMonth(dateStr: string, todayStr: string): boolean {
   if (!dateStr || !todayStr) return false;
-  const [ty, tm, td] = todayStr.split("-").map(Number);
-  const [ey, em, ed] = dateStr.split("-").map(Number);
-  const today = new Date(ty, tm - 1, td);
-  const target = new Date(ey, em - 1, ed);
-
-  const dayOfWeek = today.getDay();
-  const startOfWeek = new Date(today);
-  startOfWeek.setDate(today.getDate() - dayOfWeek);
-  startOfWeek.setHours(0, 0, 0, 0);
-
-  const endOfWeek = new Date(startOfWeek);
-  endOfWeek.setDate(startOfWeek.getDate() + 6);
-  endOfWeek.setHours(23, 59, 59, 999);
-
-  return target >= startOfWeek && target <= endOfWeek;
+  return dateStr.slice(0, 7) === todayStr.slice(0, 7);
 }
 
 function formatIsoDatePtBr(iso?: string): string {
-  if (!iso) return "17/11/2026";
+  if (!iso) return "18/11/2026";
   const d = new Date(iso);
   if (isNaN(d.getTime())) return iso;
   return d.toLocaleDateString("pt-BR");
 }
 
+// CARDS #30 e #32: Cores padronizadas (Confirmado - Verde; Cancelado - Vermelho; Pendente - Laranja)
+function getStatusBadgeClasses(status: EventRecord["status"]): string {
+  if (status === "CONFIRMADO") {
+    return "bg-emerald-500/15 text-emerald-400 border border-emerald-500/40";
+  }
+  if (status === "CANCELADO") {
+    return "bg-red-500/15 text-red-400 border border-red-500/40";
+  }
+  return "bg-orange-500/15 text-orange-400 border border-orange-500/40";
+}
+
 export default function AdminPortalPage() {
   const [activeTab, setActiveTab] = useState<AdminTab>("DASHBOARD");
-  const [todayGmt3, setTodayGmt3] = useState<string>("2026-11-17");
+  const [todayGmt3, setTodayGmt3] = useState<string>("2026-11-18");
   const [feedback, setFeedback] = useState<{ type: "success" | "error"; text: string } | null>(null);
 
   const [users, setUsers] = useState<UserAccount[]>([]);
@@ -61,13 +59,16 @@ export default function AdminPortalPage() {
   const [events, setEvents] = useState<EventRecord[]>([]);
   const [backupLogs, setBackupLogs] = useState<BackupLogRecord[]>([]);
 
+  // CARD #24: Estado para esconder/mostrar o Modal de "Novo agendamento rápido" ao clicar no botão do topo
+  const [showNewEventModal, setShowNewEventModal] = useState<boolean>(false);
+
   // Estados de Gestão de Eventos
   const [statusFilter, setStatusFilter] = useState<"TODOS" | "PENDENTE" | "CONFIRMADO" | "CANCELADO">("TODOS");
   const [searchQuery, setSearchQuery] = useState("");
   const [selectedCalendarDay, setSelectedCalendarDay] = useState<string | null>(null);
   const [evTitle, setEvTitle] = useState("");
   const [evCategoryText, setEvCategoryText] = useState("");
-  const [evHonoree, setEvHonoree] = useState("");
+  const [evGuestCount, setEvGuestCount] = useState("40"); // Card #25: Quantidade de pessoas
   const [evClient, setEvClient] = useState("");
   const [evAdmin, setEvAdmin] = useState("Administrador Da Hora");
   const [evDate, setEvDate] = useState("");
@@ -79,7 +80,7 @@ export default function AdminPortalPage() {
   const [editingEvent, setEditingEvent] = useState<EventRecord | null>(null);
   const [modTitle, setModTitle] = useState("");
   const [modCategory, setModCategory] = useState("");
-  const [modHonoree, setModHonoree] = useState("");
+  const [modGuestCount, setModGuestCount] = useState("");
   const [modClient, setModClient] = useState("");
   const [modAdmin, setModAdmin] = useState("");
   const [modDate, setModDate] = useState("");
@@ -89,7 +90,7 @@ export default function AdminPortalPage() {
   const [modTeam, setModTeam] = useState<string[]>([]);
   const [modNotes, setModNotes] = useState("");
 
-  // Estados de Cadastros para os 4 Perfis RBAC (ADM, EQUIPE_INTERNA, EQUIPE_EXTERNA, CLIENTE)
+  // Estados de Cadastros para os 4 Perfis RBAC
   const [cadRole, setCadRole] = useState<UserRole>("EQUIPE_EXTERNA");
   const [cadName, setCadName] = useState("");
   const [cadEmail, setCadEmail] = useState("");
@@ -101,11 +102,10 @@ export default function AdminPortalPage() {
   const [cadPassword, setCadPassword] = useState("");
   const [cadStatus, setCadStatus] = useState<"ATIVO" | "INATIVO">("ATIVO");
 
-  // Filtro por Abas dos 4 Perfis na Listagem Abaixo
   const [roleFilterTab, setRoleFilterTab] = useState<"TODOS" | UserRole>("TODOS");
   const [personSearch, setPersonSearch] = useState("");
 
-  // Modal de Edição de Utilizador Cadastrado
+  // Modal de Edição de Usuário Cadastrado
   const [editingUser, setEditingUser] = useState<UserAccount | null>(null);
   const [editUserName, setEditUserName] = useState("");
   const [editUserEmail, setEditUserEmail] = useState("");
@@ -130,16 +130,20 @@ export default function AdminPortalPage() {
     });
   }, []);
 
-  const eventsThisWeek = events.filter(
-    (e) => e.status !== "CANCELADO" && isDateInCurrentWeek(e.eventDate, todayGmt3)
-  );
+  // CARD #28: Eventos do Mês Atual (em vez de semana)
+  const eventsThisMonth = events.filter((e) => isDateInCurrentMonth(e.eventDate, todayGmt3));
+
+  // CARD #27: Contadores exatos de eventos por Status
+  const countAll = events.length;
+  const countPending = events.filter((e) => e.status === "PENDENTE").length;
+  const countConfirmed = events.filter((e) => e.status === "CONFIRMADO").length;
+  const countCancelled = events.filter((e) => e.status === "CANCELADO").length;
   const pendingEvents = events.filter((e) => e.status === "PENDENTE");
 
   const phoneValidation = validateAnatelPhone(cadPhone);
   const cadPwCheck = validatePasswordRbac(cadPassword);
   const editPwCheck = validatePasswordRbac(editUserNewPassword);
 
-  // Sincroniza a tabela central `users` com `staff`, `clients` e o Supabase
   const syncAllTablesFromUsers = (updatedUsers: UserAccount[]) => {
     setUsers(updatedUsers);
     saveUsersToStorage(updatedUsers);
@@ -176,7 +180,6 @@ export default function AdminPortalPage() {
     saveClientsToStorage(syncedClients);
   };
 
-  // CADASTRAR NOVA CONTA NO SUPABASE PARA QUALQUER UM DOS 4 PERFIS RBAC
   const handleSaveCadastro = (e: React.FormEvent) => {
     e.preventDefault();
     if (!phoneValidation.valid) {
@@ -226,7 +229,7 @@ export default function AdminPortalPage() {
           : cadSpecialty || "Apoio Operacional",
       companyName:
         cadRole === "EQUIPE_EXTERNA"
-          ? cadCompany || "Autónomo / MEI"
+          ? cadCompany || "Autônomo / MEI"
           : cadRole === "EQUIPE_INTERNA" || cadRole === "ADM"
           ? "Família Da Hora"
           : undefined,
@@ -276,7 +279,7 @@ export default function AdminPortalPage() {
     if (editUserNewPassword && !editPwCheck.isValid) {
       setFeedback({
         type: "error",
-        text: "A nova senha precisa de ter no mínimo 8 caracteres e incluir caractere especial.",
+        text: "A nova senha precisa ter no mínimo 8 caracteres e incluir caractere especial.",
       });
       return;
     }
@@ -311,7 +314,9 @@ export default function AdminPortalPage() {
     });
   };
 
+  // CARDS #22 e #26: Ao confirmar/aprovar um evento (no Dashboard ou na Gestão de Eventos), coloca na agenda automaticamente
   const handleApproveAndSyncGcal = (id: string) => {
+    const targetEv = events.find((ev) => ev.id === id);
     const updated = events.map((ev) =>
       ev.id === id
         ? {
@@ -320,27 +325,35 @@ export default function AdminPortalPage() {
             responsibleAdmin: ev.responsibleAdmin.includes("confirmar")
               ? "Administrador Da Hora"
               : ev.responsibleAdmin,
-            googleCalendarEventId: `gcal_sync_${Math.floor(1000 + Math.random() * 9000)}`,
+            googleCalendarEventId: `gcal_auto_${Math.floor(1000 + Math.random() * 9000)}`,
           }
         : ev
     );
     setEvents(updated);
     saveEventsToStorage(updated);
-    setFeedback({ type: "success", text: "✓ Evento aprovado no Supabase e sincronizado com o Google Calendar!" });
+
+    if (targetEv) {
+      setEvDate(targetEv.eventDate);
+    }
+
+    setFeedback({
+      type: "success",
+      text: `✓ Evento "${targetEv?.title || id}" confirmado e adicionado automaticamente na agenda do mês!`,
+    });
   };
 
   const handleCancelEvent = (id: string) => {
     const updated = events.map((ev) => (ev.id === id ? { ...ev, status: "CANCELADO" as const } : ev));
     setEvents(updated);
     saveEventsToStorage(updated);
-    setFeedback({ type: "success", text: "Evento cancelado no Supabase e horário libertado na agenda." });
+    setFeedback({ type: "success", text: "Evento marcado como Cancelado (Vermelho) e horário liberado." });
   };
 
   const openEventModal = (ev: EventRecord) => {
     setEditingEvent(ev);
     setModTitle(ev.title);
     setModCategory(ev.eventType);
-    setModHonoree(ev.honoreeName);
+    setModGuestCount(ev.honoreeName);
     setModClient(ev.clientName);
     setModAdmin(ev.responsibleAdmin);
     setModDate(ev.eventDate);
@@ -359,11 +372,15 @@ export default function AdminPortalPage() {
       return;
     }
 
+    const formattedGuests = modGuestCount.includes("pessoa")
+      ? modGuestCount
+      : `${modGuestCount} pessoas`;
+
     const updatedEv: EventRecord = {
       ...editingEvent,
       title: modTitle,
       eventType: modCategory || "Evento",
-      honoreeName: modHonoree,
+      honoreeName: formattedGuests,
       clientName: modClient,
       responsibleAdmin: modAdmin,
       eventDate: modDate,
@@ -378,17 +395,18 @@ export default function AdminPortalPage() {
     setEvents(updatedList);
     saveEventsToStorage(updatedList);
     setEditingEvent(null);
-    setFeedback({ type: "success", text: "✓ Dados e escala do evento atualizados no Supabase!" });
+    setFeedback({ type: "success", text: "✓ Dados e escala do evento atualizados na agenda e no Supabase!" });
   };
 
+  // CARD #21: Ao adicionar um evento como ADM, ele adiciona na agenda automaticamente como CONFIRMADO
   const handleCreateManualEvent = (e: React.FormEvent) => {
     e.preventDefault();
     if (!evCategoryText.trim()) {
       setFeedback({ type: "error", text: "Digite a categoria do evento." });
       return;
     }
-    if (!evHonoree.trim()) {
-      setFeedback({ type: "error", text: "Informe obrigatoriamente 'Para quem é o evento?'." });
+    if (!evGuestCount.trim()) {
+      setFeedback({ type: "error", text: "Informe obrigatoriamente a 'Quantidade de pessoas'." });
       return;
     }
     if (evEnd <= evStart) {
@@ -411,18 +429,20 @@ export default function AdminPortalPage() {
       return;
     }
 
+    const formattedGuests = evGuestCount.includes("pessoa") ? evGuestCount : `${evGuestCount} pessoas`;
+
     const newEv: EventRecord = {
       id: `EV-${Math.floor(1000 + Math.random() * 9000)}`,
-      title: evTitle || `${evCategoryText} - ${evHonoree}`,
+      title: evTitle || `${evCategoryText} (${formattedGuests})`,
       eventType: evCategoryText.trim(),
-      honoreeName: evHonoree,
+      honoreeName: formattedGuests,
       clientName: evClient || "Cliente Da Hora",
       responsibleAdmin: evAdmin,
       eventDate: evDate,
       startTime: evStart,
       endTime: evEnd,
       status: "CONFIRMADO",
-      googleCalendarEventId: `gcal_sync_${Math.floor(1000 + Math.random() * 9000)}`,
+      googleCalendarEventId: `gcal_auto_${Math.floor(1000 + Math.random() * 9000)}`,
       supportTeam: evStaffSelected.length > 0 ? evStaffSelected : ["Equipe padrão"],
     };
 
@@ -431,9 +451,14 @@ export default function AdminPortalPage() {
     saveEventsToStorage(updated);
     setEvTitle("");
     setEvCategoryText("");
-    setEvHonoree("");
+    setEvGuestCount("40");
     setEvClient("");
-    setFeedback({ type: "success", text: "✓ Novo agendamento guardado no Supabase!" });
+    setShowNewEventModal(false);
+    setSelectedCalendarDay(evDate);
+    setFeedback({
+      type: "success",
+      text: `✓ Evento "${newEv.title}" adicionado automaticamente na agenda do dia ${newEv.eventDate}!`,
+    });
   };
 
   const handleDownloadBackup = async (scope: "Usuários" | "Eventos" | "Completo", format: "JSON" | "SQL") => {
@@ -502,7 +527,6 @@ export default function AdminPortalPage() {
     setFeedback({ type: "success", text: "🗑️ Último backup excluído do Supabase!" });
   };
 
-  // CORRIGIDO: Adicionado async / await para resolver a Promise do resetDatabaseToAdminOnly()
   const handleResetSystemFromBackupTab = async () => {
     const clean = await resetDatabaseToAdminOnly();
     setUsers(clean.users);
@@ -567,7 +591,7 @@ export default function AdminPortalPage() {
               PAINEL DA FAMÍLIA
             </p>
             {[
-              { id: "DASHBOARD", label: "Dashboard", icon: "⊞" },
+              { id: "DASHBOARD", label: "Dashboard (Mensal)", icon: "⊞" },
               { id: "EVENTOS", label: "Gestão de eventos", icon: "📅" },
               { id: "CADASTROS", label: "Cadastros (RBAC)", icon: "👥" },
               { id: "BACKUP", label: "Backup e governança", icon: "🛡️" },
@@ -594,7 +618,7 @@ export default function AdminPortalPage() {
               <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" /> ✓ Conectado
             </span>
             <p className="text-xs font-bold text-white">Supabase & Google Calendar</p>
-            <p className="text-[11px] text-slate-400">Banco em nuvem sincronizado.</p>
+            <p className="text-[11px] text-slate-400">Agenda sincronizada automaticamente.</p>
           </div>
 
           <div className="border-t border-slate-800/80 pt-4 space-y-3">
@@ -613,7 +637,7 @@ export default function AdminPortalPage() {
                 setCurrentUserSession(null);
                 window.location.href = "/";
               }}
-              className="flex items-center gap-2 text-xs text-slate-400 hover:text-rose-400 px-1 transition"
+              className="flex items-center gap-2 text-xs text-slate-400 hover:text-red-400 px-1 transition"
             >
               <span>↪</span>
               <span>Sair da conta</span>
@@ -629,27 +653,30 @@ export default function AdminPortalPage() {
               ADMINISTRAÇÃO DO ESPAÇO · SUPABASE CLOUD
             </p>
             <h1 className="text-2xl sm:text-3xl font-extrabold text-white mt-0.5">
-              {activeTab === "DASHBOARD" && "Dashboard"}
+              {activeTab === "DASHBOARD" && "Dashboard do Mês"}
               {activeTab === "EVENTOS" && "Gestão de eventos"}
               {activeTab === "CADASTROS" && "Cadastros por Perfil RBAC"}
               {activeTab === "BACKUP" && "Backup e governança"}
             </h1>
             <p className="text-xs text-slate-400 mt-0.5">
-              {activeTab === "DASHBOARD" && "Visão geral da Agenda da Semana sincronizada no Supabase."}
-              {activeTab === "EVENTOS" && "Calendário interativo, categorias livres e escala."}
+              {activeTab === "DASHBOARD" &&
+                "Visão mensal completa · Cores: Confirmado (Verde), Pendente (Laranja), Cancelado (Vermelho)."}
+              {activeTab === "EVENTOS" &&
+                "Agenda cobrindo 100% da área. Use o botão no topo para abrir um Novo Agendamento Rápido."}
               {activeTab === "CADASTROS" &&
                 "Qualquer conta criada aqui é gravada no Supabase e já pode fazer login imediatamente."}
               {activeTab === "BACKUP" && "Exportação segura, exclusão de último backup e reset."}
             </p>
           </div>
 
-          {activeTab === "DASHBOARD" && (
+          {/* CARD #24: Botão na parte de cima para abrir o modal de Novo Agendamento Rápido */}
+          {(activeTab === "DASHBOARD" || activeTab === "EVENTOS") && (
             <button
               type="button"
-              onClick={() => setActiveTab("EVENTOS")}
-              className="text-xs bg-[#F59E0B] hover:bg-amber-400 text-slate-950 font-bold px-4 py-2.5 rounded-xl transition shrink-0"
+              onClick={() => setShowNewEventModal(true)}
+              className="text-xs bg-[#F59E0B] hover:bg-amber-400 text-slate-950 font-extrabold px-5 py-3 rounded-xl transition shrink-0 shadow-lg shadow-amber-500/20"
             >
-              + Novo evento
+              + Novo agendamento rápido
             </button>
           )}
         </header>
@@ -659,7 +686,7 @@ export default function AdminPortalPage() {
             className={`mx-6 mt-5 p-3.5 rounded-xl text-xs flex justify-between items-center border ${
               feedback.type === "success"
                 ? "bg-emerald-950/60 border-emerald-500/40 text-emerald-200"
-                : "bg-rose-950/60 border-rose-500/40 text-rose-200"
+                : "bg-red-950/60 border-red-500/40 text-red-200"
             }`}
           >
             <span>{feedback.text}</span>
@@ -670,7 +697,7 @@ export default function AdminPortalPage() {
         )}
 
         <main className="p-6 space-y-6 flex-1">
-          {/* ABA 1: DASHBOARD */}
+          {/* ABA 1: DASHBOARD MENSAL (Card #28 e Card #32) */}
           {activeTab === "DASHBOARD" && (
             <div className="space-y-6">
               <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4">
@@ -682,15 +709,15 @@ export default function AdminPortalPage() {
                   className="cursor-pointer bg-[#111726] hover:bg-[#161E31] border border-slate-800/90 rounded-2xl p-5 border-t-2 border-t-amber-500 transition"
                 >
                   <div className="flex justify-between items-center text-xs text-slate-400">
-                    <span>Eventos na semana</span>
+                    <span>Eventos no mês</span>
                     <span className="text-[10px] font-bold bg-amber-500/15 text-amber-400 px-2 py-0.5 rounded">
-                      SEMANA ATUAL
+                      MÊS ATUAL ({currentYearMonth})
                     </span>
                   </div>
                   <p className="text-4xl font-extrabold text-white mt-2">
-                    {String(eventsThisWeek.length).padStart(2, "0")}
+                    {String(eventsThisMonth.length).padStart(2, "0")}
                   </p>
-                  <p className="text-xs text-amber-400/80 mt-1">Clique para gerir →</p>
+                  <p className="text-xs text-amber-400/80 mt-1">Ver agenda completa do mês →</p>
                 </div>
 
                 <div
@@ -701,13 +728,13 @@ export default function AdminPortalPage() {
                   className="cursor-pointer bg-[#111726] hover:bg-[#161E31] border border-slate-800/90 rounded-2xl p-5 border-t-2 border-t-emerald-500 transition"
                 >
                   <div className="flex justify-between items-center text-xs text-slate-400">
-                    <span>Confirmados / ativos</span>
-                    <span className="text-emerald-400">✓</span>
+                    <span>Confirmados no mês (Verde)</span>
+                    <span className="text-emerald-400 font-bold">✓</span>
                   </div>
                   <p className="text-4xl font-extrabold text-emerald-400 mt-2">
-                    {String(eventsThisWeek.filter((e) => e.status === "CONFIRMADO").length).padStart(2, "0")}
+                    {String(eventsThisMonth.filter((e) => e.status === "CONFIRMADO").length).padStart(2, "0")}
                   </p>
-                  <p className="text-xs text-slate-500 mt-1">Filtrar confirmados →</p>
+                  <p className="text-xs text-emerald-400/80 mt-1">Total geral: {countConfirmed} confirmado(s) →</p>
                 </div>
 
                 <div
@@ -715,30 +742,33 @@ export default function AdminPortalPage() {
                     setStatusFilter("PENDENTE");
                     setActiveTab("EVENTOS");
                   }}
-                  className="cursor-pointer bg-[#111726] hover:bg-[#161E31] border border-slate-800/90 rounded-2xl p-5 border-t-2 border-t-amber-400 transition"
+                  className="cursor-pointer bg-[#111726] hover:bg-[#161E31] border border-slate-800/90 rounded-2xl p-5 border-t-2 border-t-orange-500 transition"
                 >
                   <div className="flex justify-between items-center text-xs text-slate-400">
-                    <span>Solicitações pendentes</span>
-                    <span className="text-amber-400">●</span>
+                    <span>Pendentes (Laranja)</span>
+                    <span className="text-orange-400 font-bold">●</span>
                   </div>
-                  <p className="text-4xl font-extrabold text-amber-400 mt-2">
-                    {String(pendingEvents.length).padStart(2, "0")}
+                  <p className="text-4xl font-extrabold text-orange-400 mt-2">
+                    {String(countPending).padStart(2, "0")}
                   </p>
-                  <p className="text-xs text-slate-500 mt-1">Rever solicitações →</p>
+                  <p className="text-xs text-orange-400/80 mt-1">Aprovar solicitações →</p>
                 </div>
 
                 <div
-                  onClick={() => setActiveTab("CADASTROS")}
-                  className="cursor-pointer bg-[#111726] hover:bg-[#161E31] border border-slate-800/90 rounded-2xl p-5 border-t-2 border-t-sky-500 transition"
+                  onClick={() => {
+                    setStatusFilter("CANCELADO");
+                    setActiveTab("EVENTOS");
+                  }}
+                  className="cursor-pointer bg-[#111726] hover:bg-[#161E31] border border-slate-800/90 rounded-2xl p-5 border-t-2 border-t-red-500 transition"
                 >
                   <div className="flex justify-between items-center text-xs text-slate-400">
-                    <span>Contas RBAC no Supabase</span>
-                    <span className="text-sky-400">👥</span>
+                    <span>Cancelados (Vermelho)</span>
+                    <span className="text-red-400 font-bold">✕</span>
                   </div>
-                  <p className="text-4xl font-extrabold text-white mt-2">
-                    {String(users.length).padStart(2, "0")}
+                  <p className="text-4xl font-extrabold text-red-400 mt-2">
+                    {String(countCancelled).padStart(2, "0")}
                   </p>
-                  <p className="text-xs text-slate-500 mt-1">Gerir os 4 perfis →</p>
+                  <p className="text-xs text-red-400/80 mt-1">Ver histórico de cancelados →</p>
                 </div>
               </div>
 
@@ -746,28 +776,28 @@ export default function AdminPortalPage() {
                 <div className="xl:col-span-8 bg-[#111726] border border-slate-800/90 rounded-3xl p-6 space-y-4">
                   <div className="flex items-center justify-between">
                     <div>
-                      <h2 className="text-lg font-extrabold text-white">Agenda da semana</h2>
+                      <h2 className="text-lg font-extrabold text-white">Agenda do mês ({currentYearMonth})</h2>
                       <p className="text-xs text-slate-400">
-                        Clique num evento para editar dados ou clique em &quot;Editar escala&quot;
+                        Clique num evento para editar dados ou aprovar/escalar equipe
                       </p>
                     </div>
                     <span className="text-xs bg-[#0A0E17] border border-slate-800 px-3 py-1 rounded-full text-amber-400 font-semibold">
-                      {eventsThisWeek.length} evento(s)
+                      {eventsThisMonth.length} evento(s) no mês
                     </span>
                   </div>
 
-                  {eventsThisWeek.length === 0 ? (
+                  {eventsThisMonth.length === 0 ? (
                     <div className="bg-[#0A0E17] border border-slate-800/80 rounded-2xl p-8 text-center space-y-2">
                       <p className="text-sm font-semibold text-slate-300">
-                        Nenhum evento programado para esta semana.
+                        Nenhum evento programado para este mês.
                       </p>
                       <p className="text-xs text-slate-500">
-                        Use o botão &quot;+ Novo evento&quot; para agendar.
+                        Use o botão &quot;+ Novo agendamento rápido&quot; no topo para agendar.
                       </p>
                     </div>
                   ) : (
                     <div className="space-y-3">
-                      {eventsThisWeek.map((ev) => (
+                      {eventsThisMonth.map((ev) => (
                         <div
                           key={ev.id}
                           onClick={() => openEventModal(ev)}
@@ -782,18 +812,21 @@ export default function AdminPortalPage() {
                             <div className="space-y-1.5">
                               <div className="flex flex-wrap items-center gap-2">
                                 <h3 className="font-bold text-sm text-white">{ev.title}</h3>
+                                {/* CARD #32: Cores de status padronizadas */}
                                 <span
-                                  className={`text-[10px] font-bold px-2.5 py-0.5 rounded-full ${
-                                    ev.status === "CONFIRMADO"
-                                      ? "bg-emerald-500/15 text-emerald-400"
-                                      : "bg-amber-500/15 text-amber-400"
-                                  }`}
+                                  className={`text-[10px] font-bold px-2.5 py-0.5 rounded-full ${getStatusBadgeClasses(
+                                    ev.status
+                                  )}`}
                                 >
-                                  {ev.status === "CONFIRMADO" ? "✓ Confirmado" : "● Pendente"}
+                                  {ev.status === "CONFIRMADO"
+                                    ? "✓ Confirmado"
+                                    : ev.status === "CANCELADO"
+                                    ? "✕ Cancelado"
+                                    : "● Pendente"}
                                 </span>
                               </div>
                               <p className="text-xs text-slate-400">
-                                <span className="text-amber-400 font-semibold">{ev.eventType}</span> · Para:{" "}
+                                <span className="text-amber-400 font-semibold">{ev.eventType}</span> · Quantidade:{" "}
                                 <strong className="text-slate-200">{ev.honoreeName}</strong> · Cliente: {ev.clientName}
                               </p>
                               <p className="text-[11px] text-slate-400">
@@ -810,9 +843,9 @@ export default function AdminPortalPage() {
                             {ev.status === "PENDENTE" && (
                               <button
                                 onClick={() => handleApproveAndSyncGcal(ev.id)}
-                                className="bg-[#F59E0B] hover:bg-amber-400 text-slate-950 font-bold text-xs px-3.5 py-2 rounded-xl"
+                                className="bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-xs px-3.5 py-2 rounded-xl"
                               >
-                                ✓ Aprovar + GCal
+                                ✓ Aprovar na Agenda
                               </button>
                             )}
                             <button
@@ -821,12 +854,14 @@ export default function AdminPortalPage() {
                             >
                               Editar escala
                             </button>
-                            <button
-                              onClick={() => handleCancelEvent(ev.id)}
-                              className="text-xs text-slate-400 hover:text-rose-400 px-2 py-1"
-                            >
-                              Cancelar
-                            </button>
+                            {ev.status !== "CANCELADO" && (
+                              <button
+                                onClick={() => handleCancelEvent(ev.id)}
+                                className="text-xs text-red-400 hover:text-red-300 px-2 py-1"
+                              >
+                                Cancelar
+                              </button>
+                            )}
                           </div>
                         </div>
                       ))}
@@ -837,8 +872,8 @@ export default function AdminPortalPage() {
                 <div className="xl:col-span-4 space-y-4">
                   <div className="bg-[#111726] border border-slate-800/90 rounded-3xl p-5 space-y-3">
                     <div className="flex justify-between items-center">
-                      <h3 className="text-sm font-bold text-white">Precisam de si</h3>
-                      <span className="text-[11px] text-amber-400 font-semibold">
+                      <h3 className="text-sm font-bold text-white">Solicitações Pendentes</h3>
+                      <span className="text-[11px] text-orange-400 font-semibold">
                         {pendingEvents.length} pendente(s)
                       </span>
                     </div>
@@ -849,12 +884,12 @@ export default function AdminPortalPage() {
                         <div
                           key={pe.id}
                           onClick={() => openEventModal(pe)}
-                          className="cursor-pointer bg-[#0A0E17] hover:bg-[#141C2E] border border-slate-800 rounded-xl p-3 flex items-center justify-between transition"
+                          className="cursor-pointer bg-[#0A0E17] hover:bg-[#141C2E] border border-orange-500/30 rounded-xl p-3 flex items-center justify-between transition"
                         >
                           <div>
                             <p className="text-xs font-bold text-white">{pe.title}</p>
                             <p className="text-[11px] text-slate-400">
-                              {pe.eventDate}, às {pe.startTime}
+                              {pe.eventDate} · {pe.honoreeName}
                             </p>
                           </div>
                           <button
@@ -862,9 +897,9 @@ export default function AdminPortalPage() {
                               e.stopPropagation();
                               handleApproveAndSyncGcal(pe.id);
                             }}
-                            className="text-xs text-amber-400 hover:underline font-bold"
+                            className="text-xs bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 px-2.5 py-1 rounded-lg font-bold"
                           >
-                            Aprovar →
+                            ✓ Aprovar
                           </button>
                         </div>
                       ))
@@ -875,261 +910,198 @@ export default function AdminPortalPage() {
             </div>
           )}
 
-          {/* ABA 2: GESTÃO DE EVENTOS */}
+          {/* ABA 2: GESTÃO DE EVENTOS — AGENDA COBRINDO A ÁREA TODA (Cards #23, #24, #26, #27 e #30) */}
           {activeTab === "EVENTOS" && (
-            <div className="grid grid-cols-1 xl:grid-cols-12 gap-6 items-start">
-              <form
-                onSubmit={handleCreateManualEvent}
-                className="xl:col-span-5 bg-[#111726] border border-slate-800/90 rounded-3xl p-6 space-y-4"
-              >
-                <div>
-                  <h2 className="text-lg font-extrabold text-white">Novo agendamento</h2>
-                  <p className="text-xs text-slate-400">Crie, escale a equipa e grave no Supabase.</p>
-                </div>
-
-                <div>
-                  <label className="block text-xs font-medium text-slate-300 mb-1">Título do evento</label>
-                  <input
-                    type="text"
-                    required
-                    value={evTitle}
-                    onChange={(e) => setEvTitle(e.target.value)}
-                    placeholder="Aniversário da Ana Clara"
-                    className="w-full bg-[#0A0E17] border border-slate-800 rounded-xl px-3.5 py-2.5 text-xs text-white"
-                  />
-                </div>
-
-                <div className="grid grid-cols-2 gap-3">
+            <div className="w-full space-y-6">
+              {/* CALENDÁRIO MENSAL COBRINDO 100% DA LARGURA (Card #23) */}
+              <div className="w-full bg-[#111726] border border-slate-800/90 rounded-3xl p-6 space-y-4">
+                <div className="flex flex-wrap items-center justify-between gap-3">
                   <div>
-                    <label className="block text-xs font-medium text-slate-300 mb-1">Categoria (Texto livre) *</label>
-                    <input
-                      type="text"
-                      required
-                      value={evCategoryText}
-                      onChange={(e) => setEvCategoryText(e.target.value)}
-                      placeholder="Ex: Aniversário, Futebol..."
-                      className="w-full bg-[#0A0E17] border border-slate-800 rounded-xl px-3 py-2.5 text-xs text-white"
-                    />
+                    <h3 className="text-lg font-extrabold text-white">
+                      Agenda Mensal Completa ({currentYearMonth})
+                    </h3>
+                    <p className="text-xs text-slate-400">
+                      Clique em qualquer dia para filtrar os eventos ou clique em &quot;+ Novo agendamento rápido&quot; no topo
+                    </p>
                   </div>
-                  <div>
-                    <label className="block text-xs font-medium text-slate-300 mb-1">Para quem é o evento? *</label>
-                    <input
-                      type="text"
-                      required
-                      value={evHonoree}
-                      onChange={(e) => setEvHonoree(e.target.value)}
-                      placeholder="Ana Clara · 15 anos"
-                      className="w-full bg-[#0A0E17] border border-slate-800 rounded-xl px-3 py-2.5 text-xs text-white"
-                    />
-                  </div>
-                </div>
 
-                <div className="grid grid-cols-2 gap-3">
-                  <div>
-                    <label className="block text-xs font-medium text-slate-300 mb-1">Cliente vinculado</label>
-                    <input
-                      type="text"
-                      required
-                      value={evClient}
-                      onChange={(e) => setEvClient(e.target.value)}
-                      placeholder="Marcos Oliveira"
-                      className="w-full bg-[#0A0E17] border border-slate-800 rounded-xl px-3 py-2.5 text-xs text-white"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-xs font-medium text-slate-300 mb-1">Responsável ADM</label>
-                    <input
-                      type="text"
-                      required
-                      value={evAdmin}
-                      onChange={(e) => setEvAdmin(e.target.value)}
-                      className="w-full bg-[#0A0E17] border border-slate-800 rounded-xl px-3 py-2.5 text-xs text-white"
-                    />
-                  </div>
-                </div>
-
-                <div className="grid grid-cols-3 gap-2.5">
-                  <div>
-                    <label className="block text-xs font-medium text-slate-300 mb-1">Data</label>
-                    <input
-                      type="date"
-                      required
-                      value={evDate}
-                      onChange={(e) => setEvDate(e.target.value)}
-                      className="w-full bg-[#0A0E17] border border-slate-800 rounded-xl px-2.5 py-2 text-xs text-white"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-xs font-medium text-slate-300 mb-1">Início</label>
-                    <input
-                      type="time"
-                      required
-                      value={evStart}
-                      onChange={(e) => setEvStart(e.target.value)}
-                      className="w-full bg-[#0A0E17] border border-slate-800 rounded-xl px-2.5 py-2 text-xs text-white"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-xs font-medium text-slate-300 mb-1">Término</label>
-                    <input
-                      type="time"
-                      required
-                      value={evEnd}
-                      onChange={(e) => setEvEnd(e.target.value)}
-                      className="w-full bg-[#0A0E17] border border-slate-800 rounded-xl px-2.5 py-2 text-xs text-white"
-                    />
-                  </div>
-                </div>
-
-                <div>
-                  <p className="text-[11px] font-bold tracking-wider text-slate-400 uppercase mb-2">EQUIPE ESCALADA</p>
-                  <div className="space-y-2 max-h-36 overflow-y-auto">
-                    {staffList.length === 0 ? (
-                      <p className="text-xs text-slate-500 bg-[#0A0E17] p-3 rounded-xl border border-slate-800">
-                        Cadastre Equipe Interna ou Externa na aba Cadastros para escalá-los aqui.
-                      </p>
-                    ) : (
-                      staffList.map((st) => (
-                        <label
-                          key={st.id}
-                          className="flex items-center justify-between bg-[#0A0E17] border border-slate-800 px-3.5 py-2.5 rounded-xl text-xs cursor-pointer"
-                        >
-                          <span>
-                            <strong className="text-white">{st.name}</strong> ·{" "}
-                            <span className="text-slate-400">{st.specialty}</span>
-                          </span>
-                          <input
-                            type="checkbox"
-                            checked={evStaffSelected.includes(st.name)}
-                            onChange={(e) => {
-                              if (e.target.checked) setEvStaffSelected([...evStaffSelected, st.name]);
-                              else setEvStaffSelected(evStaffSelected.filter((n) => n !== st.name));
-                            }}
-                          />
-                        </label>
-                      ))
-                    )}
-                  </div>
-                </div>
-
-                <button
-                  type="submit"
-                  className="w-full bg-[#F59E0B] hover:bg-amber-400 text-slate-950 font-bold py-3.5 rounded-2xl text-xs transition"
-                >
-                  Agendar e sincronizar no Supabase
-                </button>
-              </form>
-
-              <div className="xl:col-span-7 space-y-5">
-                <div className="bg-[#111726] border border-slate-800/90 rounded-3xl p-5 space-y-4">
-                  <div className="flex flex-wrap items-center justify-between gap-2">
-                    <div>
-                      <h3 className="text-base font-extrabold text-white">
-                        Calendário Mensal ({currentYearMonth})
-                      </h3>
-                      <p className="text-xs text-slate-400">Clique num dia para filtrar ou selecionar a data</p>
-                    </div>
+                  <div className="flex flex-wrap items-center gap-4 text-xs">
+                    <span className="flex items-center gap-1.5 text-emerald-400 font-semibold">
+                      <span className="w-2.5 h-2.5 rounded-full bg-emerald-400" /> Confirmado ({countConfirmed})
+                    </span>
+                    <span className="flex items-center gap-1.5 text-orange-400 font-semibold">
+                      <span className="w-2.5 h-2.5 rounded-full bg-orange-400" /> Pendente ({countPending})
+                    </span>
+                    <span className="flex items-center gap-1.5 text-red-400 font-semibold">
+                      <span className="w-2.5 h-2.5 rounded-full bg-red-500" /> Cancelado ({countCancelled})
+                    </span>
                     {selectedCalendarDay && (
                       <button
                         onClick={() => setSelectedCalendarDay(null)}
-                        className="text-xs text-amber-400 underline font-semibold"
+                        className="text-amber-400 underline font-bold"
                       >
-                        Mostrar todos os dias
+                        Mostrar mês inteiro
                       </button>
                     )}
                   </div>
-
-                  <div className="grid grid-cols-7 gap-1.5 text-center text-[10px] font-bold text-slate-500 uppercase">
-                    <span>DOM</span>
-                    <span>SEG</span>
-                    <span>TER</span>
-                    <span>QUA</span>
-                    <span>QUI</span>
-                    <span>SEX</span>
-                    <span>SÁB</span>
-                  </div>
-
-                  <div className="grid grid-cols-7 gap-1.5">
-                    {Array.from({ length: firstWeekday }).map((_, idx) => (
-                      <div key={`empty-${idx}`} className="h-10 rounded-xl bg-transparent" />
-                    ))}
-                    {Array.from({ length: daysInMonth }).map((_, idx) => {
-                      const dayNum = idx + 1;
-                      const fullDate = `${currentYearMonth}-${String(dayNum).padStart(2, "0")}`;
-                      const dayEvents = events.filter((e) => e.eventDate === fullDate && e.status !== "CANCELADO");
-                      const isSelected = selectedCalendarDay === fullDate;
-
-                      return (
-                        <button
-                          key={fullDate}
-                          type="button"
-                          onClick={() => {
-                            setEvDate(fullDate);
-                            setSelectedCalendarDay(isSelected ? null : fullDate);
-                          }}
-                          className={`h-10 rounded-xl border text-xs font-bold flex flex-col items-center justify-center transition ${
-                            isSelected
-                              ? "bg-[#F59E0B] text-slate-950 border-amber-400"
-                              : "bg-[#0A0E17] text-slate-300 border-slate-800/80 hover:border-slate-700"
-                          }`}
-                        >
-                          <span>{dayNum}</span>
-                          {dayEvents.length > 0 && (
-                            <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 mt-0.5" />
-                          )}
-                        </button>
-                      );
-                    })}
-                  </div>
                 </div>
 
-                <div className="bg-[#111726] border border-slate-800/90 rounded-3xl p-5 space-y-4">
-                  <div className="flex flex-wrap items-center justify-between gap-2">
-                    <div className="flex gap-1.5 bg-[#0A0E17] p-1 rounded-xl border border-slate-800">
-                      {(["TODOS", "PENDENTE", "CONFIRMADO", "CANCELADO"] as const).map((st) => (
-                        <button
-                          key={st}
-                          onClick={() => setStatusFilter(st)}
-                          className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition ${
-                            statusFilter === st ? "bg-[#F59E0B] text-slate-950 font-bold" : "text-slate-400"
-                          }`}
-                        >
-                          {st}
-                        </button>
-                      ))}
-                    </div>
+                <div className="grid grid-cols-7 gap-2 text-center text-[11px] font-bold text-slate-400 uppercase">
+                  <span>DOM</span>
+                  <span>SEG</span>
+                  <span>TER</span>
+                  <span>QUA</span>
+                  <span>QUI</span>
+                  <span>SEX</span>
+                  <span>SÁB</span>
+                </div>
 
-                    <input
-                      type="text"
-                      value={searchQuery}
-                      onChange={(e) => setSearchQuery(e.target.value)}
-                      placeholder="🔍 Procurar evento..."
-                      className="bg-[#0A0E17] border border-slate-800 rounded-xl px-3.5 py-2 text-xs text-white"
-                    />
+                <div className="grid grid-cols-7 gap-2">
+                  {Array.from({ length: firstWeekday }).map((_, idx) => (
+                    <div key={`empty-${idx}`} className="h-14 rounded-2xl bg-transparent" />
+                  ))}
+                  {Array.from({ length: daysInMonth }).map((_, idx) => {
+                    const dayNum = idx + 1;
+                    const fullDate = `${currentYearMonth}-${String(dayNum).padStart(2, "0")}`;
+                    const dayEvents = events.filter((e) => e.eventDate === fullDate);
+                    const hasConfirmed = dayEvents.some((e) => e.status === "CONFIRMADO");
+                    const hasPending = dayEvents.some((e) => e.status === "PENDENTE");
+                    const hasCancelled = dayEvents.some((e) => e.status === "CANCELADO");
+                    const isSelected = selectedCalendarDay === fullDate;
+
+                    return (
+                      <button
+                        key={fullDate}
+                        type="button"
+                        onClick={() => {
+                          setEvDate(fullDate);
+                          setSelectedCalendarDay(isSelected ? null : fullDate);
+                        }}
+                        className={`h-14 rounded-2xl border text-xs font-bold flex flex-col items-center justify-center transition ${
+                          isSelected
+                            ? "bg-[#F59E0B] text-slate-950 border-amber-400 shadow-lg"
+                            : "bg-[#0A0E17] text-slate-200 border-slate-800/80 hover:border-amber-500/50"
+                        }`}
+                      >
+                        <span>{dayNum}</span>
+                        {dayEvents.length > 0 && (
+                          <div className="flex items-center gap-1 mt-1">
+                            {hasConfirmed && <span className="w-2 h-2 rounded-full bg-emerald-400" />}
+                            {hasPending && <span className="w-2 h-2 rounded-full bg-orange-400" />}
+                            {hasCancelled && <span className="w-2 h-2 rounded-full bg-red-500" />}
+                          </div>
+                        )}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* LISTAGEM DE EVENTOS EM LARGURA TOTAL COM CONTAGEM POR STATUS (Card #27) E BOTÃO APROVAR (Card #26) */}
+              <div className="w-full bg-[#111726] border border-slate-800/90 rounded-3xl p-6 space-y-5">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  {/* CARD #27: Mostrar quantidade de eventos de acordo com o Status */}
+                  <div className="flex flex-wrap gap-2 bg-[#0A0E17] p-1.5 rounded-2xl border border-slate-800">
+                    <button
+                      onClick={() => setStatusFilter("TODOS")}
+                      className={`px-3.5 py-2 rounded-xl text-xs font-bold transition ${
+                        statusFilter === "TODOS"
+                          ? "bg-[#F59E0B] text-slate-950"
+                          : "text-slate-400 hover:text-white"
+                      }`}
+                    >
+                      Todos ({countAll})
+                    </button>
+                    <button
+                      onClick={() => setStatusFilter("PENDENTE")}
+                      className={`px-3.5 py-2 rounded-xl text-xs font-bold transition ${
+                        statusFilter === "PENDENTE"
+                          ? "bg-orange-500 text-slate-950"
+                          : "text-orange-400 hover:bg-orange-500/10"
+                      }`}
+                    >
+                      ● Pendentes ({countPending})
+                    </button>
+                    <button
+                      onClick={() => setStatusFilter("CONFIRMADO")}
+                      className={`px-3.5 py-2 rounded-xl text-xs font-bold transition ${
+                        statusFilter === "CONFIRMADO"
+                          ? "bg-emerald-500 text-slate-950"
+                          : "text-emerald-400 hover:bg-emerald-500/10"
+                      }`}
+                    >
+                      ✓ Confirmados ({countConfirmed})
+                    </button>
+                    <button
+                      onClick={() => setStatusFilter("CANCELADO")}
+                      className={`px-3.5 py-2 rounded-xl text-xs font-bold transition ${
+                        statusFilter === "CANCELADO"
+                          ? "bg-red-500 text-white"
+                          : "text-red-400 hover:bg-red-500/10"
+                      }`}
+                    >
+                      ✕ Cancelados ({countCancelled})
+                    </button>
                   </div>
 
+                  <input
+                    type="text"
+                    value={searchQuery}
+                    onChange={(e) => setSearchQuery(e.target.value)}
+                    placeholder="🔍 Procurar evento por título, data ou categoria..."
+                    className="bg-[#0A0E17] border border-slate-800 rounded-xl px-4 py-2.5 text-xs text-white w-full sm:w-80"
+                  />
+                </div>
+
+                {filteredEvents.length === 0 ? (
+                  <p className="text-xs text-slate-500 py-8 text-center">
+                    Nenhum evento encontrado para o filtro selecionado.
+                  </p>
+                ) : (
                   <div className="space-y-3">
                     {filteredEvents.map((ev) => (
                       <div
                         key={ev.id}
                         className="bg-[#0A0E17] border border-slate-800 rounded-2xl p-4 flex flex-col sm:flex-row justify-between gap-4"
                       >
-                        <div className="space-y-1">
+                        <div className="space-y-1.5">
                           <div className="flex flex-wrap items-center gap-2">
                             <h3 className="font-bold text-sm text-white">{ev.title}</h3>
-                            <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-slate-800 text-amber-300">
+                            <span className="text-[10px] font-bold px-2.5 py-0.5 rounded bg-slate-800 text-amber-300">
                               {ev.eventType}
                             </span>
-                            <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-400">
-                              {ev.status}
+                            {/* CARD #30: Cores Confirmado Verde, Cancelado Vermelho, Pendente Laranja */}
+                            <span
+                              className={`text-[10px] font-bold px-2.5 py-0.5 rounded-full ${getStatusBadgeClasses(
+                                ev.status
+                              )}`}
+                            >
+                              {ev.status === "CONFIRMADO"
+                                ? "✓ Confirmado"
+                                : ev.status === "CANCELADO"
+                                ? "✕ Cancelado"
+                                : "● Pendente"}
                             </span>
                           </div>
-                          <p className="text-xs text-slate-400">
-                            {ev.eventDate} · {ev.startTime} - {ev.endTime} · Para: <strong>{ev.honoreeName}</strong>
+                          <p className="text-xs text-slate-300">
+                            📅 <strong>{ev.eventDate}</strong> ({ev.startTime} - {ev.endTime}) · 👥 Quantidade:{" "}
+                            <strong>{ev.honoreeName}</strong> · Cliente: {ev.clientName}
+                          </p>
+                          <p className="text-[11px] text-slate-500">
+                            ADM: {ev.responsibleAdmin} · Equipe: {ev.supportTeam.join(", ")}
                           </p>
                         </div>
 
                         <div className="flex flex-wrap items-center gap-2 shrink-0">
+                          {/* CARD #26: Deve ser possível aprovar os eventos na área de gestão também */}
+                          {ev.status === "PENDENTE" && (
+                            <button
+                              onClick={() => handleApproveAndSyncGcal(ev.id)}
+                              className="bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-extrabold text-xs px-3.5 py-2 rounded-xl transition shadow-md"
+                            >
+                              ✓ Aprovar evento
+                            </button>
+                          )}
                           <button
                             onClick={() => openEventModal(ev)}
                             className="bg-[#192236] hover:bg-slate-800 text-amber-400 border border-amber-500/30 text-xs font-semibold px-3 py-2 rounded-xl"
@@ -1144,11 +1116,19 @@ export default function AdminPortalPage() {
                           >
                             📅 GCal
                           </a>
+                          {ev.status !== "CANCELADO" && (
+                            <button
+                              onClick={() => handleCancelEvent(ev.id)}
+                              className="bg-red-950/60 hover:bg-red-900 text-red-200 border border-red-800/60 text-xs font-semibold px-3 py-2 rounded-xl"
+                            >
+                              Cancelar
+                            </button>
+                          )}
                         </div>
                       </div>
                     ))}
                   </div>
-                </div>
+                )}
               </div>
             </div>
           )}
@@ -1205,9 +1185,7 @@ export default function AdminPortalPage() {
                   </div>
 
                   <div>
-                    <label className="block text-xs font-medium text-slate-300 mb-1">
-                      E-mail de Login *
-                    </label>
+                    <label className="block text-xs font-medium text-slate-300 mb-1">E-mail de Login *</label>
                     <input
                       type="email"
                       required
@@ -1344,9 +1322,7 @@ export default function AdminPortalPage() {
                       <span className={cadPwCheck.hasUpper && cadPwCheck.hasLower ? "text-emerald-400" : "text-slate-500"}>
                         ✓ Maiúscula e minúscula
                       </span>
-                      <span className={cadPwCheck.hasNumber ? "text-emerald-400" : "text-slate-500"}>
-                        ✓ Número
-                      </span>
+                      <span className={cadPwCheck.hasNumber ? "text-emerald-400" : "text-slate-500"}>✓ Número</span>
                     </div>
                   </div>
                 </div>
@@ -1443,7 +1419,7 @@ export default function AdminPortalPage() {
                               className={`px-2.5 py-1 rounded-full text-[10px] font-bold ${
                                 u.status === "ATIVO"
                                   ? "bg-emerald-500/15 text-emerald-400 border border-emerald-500/30"
-                                  : "bg-rose-500/15 text-rose-400 border border-rose-500/30"
+                                  : "bg-red-500/15 text-red-400 border border-red-500/30"
                               }`}
                             >
                               {u.status === "ATIVO" ? "● Ativo" : "○ Inativo"}
@@ -1484,7 +1460,7 @@ export default function AdminPortalPage() {
                   {
                     scope: "Eventos" as const,
                     title: "Eventos e escalas",
-                    desc: "Histórico completo, homenageados, datas em GMT-3 e equipas escaladas.",
+                    desc: "Histórico completo, quantidade de pessoas, datas em GMT-3 e equipes escaladas.",
                     badge: `${events.length} eventos`,
                   },
                   {
@@ -1526,7 +1502,7 @@ export default function AdminPortalPage() {
 
               <div className="bg-[#111726] border border-amber-500/30 rounded-3xl p-5 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
                 <div>
-                  <h3 className="text-sm font-extrabold text-white">Controlo de Governança e Reset</h3>
+                  <h3 className="text-sm font-extrabold text-white">Controle de Governança e Reset</h3>
                   <p className="text-xs text-slate-400">
                     Exclua o último backup ou faça reset às tabelas do Supabase mantendo apenas o ADM padrão.
                   </p>
@@ -1542,7 +1518,7 @@ export default function AdminPortalPage() {
                   <button
                     type="button"
                     onClick={handleResetSystemFromBackupTab}
-                    className="bg-rose-950/80 hover:bg-rose-900 text-rose-200 border border-rose-800 font-bold px-4 py-2.5 rounded-xl text-xs transition"
+                    className="bg-red-950/80 hover:bg-red-900 text-red-200 border border-red-800 font-bold px-4 py-2.5 rounded-xl text-xs transition"
                   >
                     🧹 Resetar sistema
                   </button>
@@ -1552,6 +1528,170 @@ export default function AdminPortalPage() {
           )}
         </main>
       </div>
+
+      {/* CARD #24: MODAL DE "NOVO AGENDAMENTO RÁPIDO" (Escondido por padrão, abre ao clicar no botão do topo) */}
+      {showNewEventModal && (
+        <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-sm flex items-center justify-center p-4">
+          <form
+            onSubmit={handleCreateManualEvent}
+            className="bg-[#111726] border border-slate-700 rounded-3xl max-w-lg w-full p-6 space-y-4 shadow-2xl text-xs"
+          >
+            <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+              <div>
+                <span className="text-[10px] font-bold uppercase text-amber-400">
+                  ADICIONAR AUTOMATICAMENTE NA AGENDA
+                </span>
+                <h2 className="text-lg font-extrabold text-white mt-0.5">+ Novo agendamento rápido</h2>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowNewEventModal(false)}
+                className="text-slate-400 hover:text-white text-base font-bold px-2"
+              >
+                ✕
+              </button>
+            </div>
+
+            <div>
+              <label className="block text-slate-300 mb-1">Título do evento *</label>
+              <input
+                type="text"
+                required
+                value={evTitle}
+                onChange={(e) => setEvTitle(e.target.value)}
+                placeholder="Ex: Churrasco Aniversário"
+                className="w-full bg-[#0A0E17] border border-slate-800 rounded-xl px-3.5 py-2.5 text-white"
+              />
+            </div>
+
+            {/* CARD #25: Quantidade de pessoas */}
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="block text-slate-300 mb-1">Categoria (Texto livre) *</label>
+                <input
+                  type="text"
+                  required
+                  value={evCategoryText}
+                  onChange={(e) => setEvCategoryText(e.target.value)}
+                  placeholder="Ex: Aniversário, Futebol..."
+                  className="w-full bg-[#0A0E17] border border-slate-800 rounded-xl px-3 py-2.5 text-white"
+                />
+              </div>
+              <div>
+                <label className="block text-slate-300 mb-1">Quantidade de pessoas *</label>
+                <input
+                  type="number"
+                  min="1"
+                  required
+                  value={evGuestCount}
+                  onChange={(e) => setEvGuestCount(e.target.value)}
+                  placeholder="Ex: 50"
+                  className="w-full bg-[#0A0E17] border border-slate-800 rounded-xl px-3 py-2.5 text-white"
+                />
+              </div>
+            </div>
+
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="block text-slate-300 mb-1">Cliente vinculado</label>
+                <input
+                  type="text"
+                  required
+                  value={evClient}
+                  onChange={(e) => setEvClient(e.target.value)}
+                  placeholder="Marcos Oliveira"
+                  className="w-full bg-[#0A0E17] border border-slate-800 rounded-xl px-3 py-2.5 text-white"
+                />
+              </div>
+              <div>
+                <label className="block text-slate-300 mb-1">Responsável ADM</label>
+                <input
+                  type="text"
+                  required
+                  value={evAdmin}
+                  onChange={(e) => setEvAdmin(e.target.value)}
+                  className="w-full bg-[#0A0E17] border border-slate-800 rounded-xl px-3 py-2.5 text-white"
+                />
+              </div>
+            </div>
+
+            <div className="grid grid-cols-3 gap-2.5">
+              <div>
+                <label className="block text-slate-300 mb-1">Data</label>
+                <input
+                  type="date"
+                  required
+                  value={evDate}
+                  onChange={(e) => setEvDate(e.target.value)}
+                  className="w-full bg-[#0A0E17] border border-slate-800 rounded-xl px-2.5 py-2 text-white"
+                />
+              </div>
+              <div>
+                <label className="block text-slate-300 mb-1">Início</label>
+                <input
+                  type="time"
+                  required
+                  value={evStart}
+                  onChange={(e) => setEvStart(e.target.value)}
+                  className="w-full bg-[#0A0E17] border border-slate-800 rounded-xl px-2.5 py-2 text-white"
+                />
+              </div>
+              <div>
+                <label className="block text-slate-300 mb-1">Término</label>
+                <input
+                  type="time"
+                  required
+                  value={evEnd}
+                  onChange={(e) => setEvEnd(e.target.value)}
+                  className="w-full bg-[#0A0E17] border border-slate-800 rounded-xl px-2.5 py-2 text-white"
+                />
+              </div>
+            </div>
+
+            <div>
+              <p className="text-[11px] font-bold tracking-wider text-slate-400 uppercase mb-1.5">EQUIPE ESCALADA</p>
+              <div className="space-y-1.5 max-h-32 overflow-y-auto bg-[#0A0E17] border border-slate-800 p-3 rounded-xl">
+                {staffList.length === 0 ? (
+                  <p className="text-slate-500">Cadastre Equipe Interna ou Externa na aba Cadastros para escalá-los.</p>
+                ) : (
+                  staffList.map((st) => (
+                    <label key={st.id} className="flex items-center justify-between cursor-pointer py-1">
+                      <span>
+                        <strong className="text-white">{st.name}</strong> ·{" "}
+                        <span className="text-slate-400">{st.specialty}</span>
+                      </span>
+                      <input
+                        type="checkbox"
+                        checked={evStaffSelected.includes(st.name)}
+                        onChange={(e) => {
+                          if (e.target.checked) setEvStaffSelected([...evStaffSelected, st.name]);
+                          else setEvStaffSelected(evStaffSelected.filter((n) => n !== st.name));
+                        }}
+                      />
+                    </label>
+                  ))
+                )}
+              </div>
+            </div>
+
+            <div className="flex gap-2.5 pt-2">
+              <button
+                type="submit"
+                className="flex-1 bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-extrabold py-3 rounded-xl transition"
+              >
+                ✓ Confirmar e colocar na agenda
+              </button>
+              <button
+                type="button"
+                onClick={() => setShowNewEventModal(false)}
+                className="bg-slate-800 text-slate-300 font-bold py-3 px-4 rounded-xl"
+              >
+                Fechar
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
 
       {/* MODAL DE EDIÇÃO DE CONTA CADASTRADA */}
       {editingUser && (
@@ -1637,9 +1777,7 @@ export default function AdminPortalPage() {
             </div>
 
             <div>
-              <label className="block text-slate-300 mb-1">
-                Nova senha (Opcional · Mín. 8 chars + especial)
-              </label>
+              <label className="block text-slate-300 mb-1">Nova senha (Opcional · Mín. 8 chars + especial)</label>
               <input
                 type="text"
                 value={editUserNewPassword}
@@ -1707,6 +1845,61 @@ export default function AdminPortalPage() {
                   className="w-full bg-[#0A0E17] border border-slate-800 rounded-xl px-3 py-2 text-white"
                 />
               </div>
+              <div>
+                <label className="block text-slate-300 mb-1">Quantidade de pessoas</label>
+                <input
+                  type="text"
+                  required
+                  value={modGuestCount}
+                  onChange={(e) => setModGuestCount(e.target.value)}
+                  className="w-full bg-[#0A0E17] border border-slate-800 rounded-xl px-3 py-2 text-white"
+                />
+              </div>
+              <div>
+                <label className="block text-slate-300 mb-1">Status (Verde / Laranja / Vermelho)</label>
+                <select
+                  value={modStatus}
+                  onChange={(e) => setModStatus(e.target.value as EventRecord["status"])}
+                  className="w-full bg-[#0A0E17] border border-slate-800 rounded-xl px-3 py-2 text-white"
+                >
+                  <option value="CONFIRMADO">🟢 Confirmado (Verde)</option>
+                  <option value="PENDENTE">🟠 Pendente (Laranja)</option>
+                  <option value="CANCELADO">🔴 Cancelado (Vermelho)</option>
+                </select>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-3 gap-2.5">
+              <div>
+                <label className="block text-slate-300 mb-1">Data</label>
+                <input
+                  type="date"
+                  required
+                  value={modDate}
+                  onChange={(e) => setModDate(e.target.value)}
+                  className="w-full bg-[#0A0E17] border border-slate-800 rounded-xl px-2.5 py-2 text-white"
+                />
+              </div>
+              <div>
+                <label className="block text-slate-300 mb-1">Início</label>
+                <input
+                  type="time"
+                  required
+                  value={modStart}
+                  onChange={(e) => setModStart(e.target.value)}
+                  className="w-full bg-[#0A0E17] border border-slate-800 rounded-xl px-2.5 py-2 text-white"
+                />
+              </div>
+              <div>
+                <label className="block text-slate-300 mb-1">Término</label>
+                <input
+                  type="time"
+                  required
+                  value={modEnd}
+                  onChange={(e) => setEditEndOrModEnd(e.target.value)}
+                  className="w-full bg-[#0A0E17] border border-slate-800 rounded-xl px-2.5 py-2 text-white"
+                />
+              </div>
             </div>
 
             <div>
@@ -1750,4 +1943,8 @@ export default function AdminPortalPage() {
       )}
     </div>
   );
+
+  function setEditEndOrModEnd(val: string) {
+    setModEnd(val);
+  }
 }
