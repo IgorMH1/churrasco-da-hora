@@ -43,7 +43,7 @@ export default function LoginAndPublicPortal() {
   const [newRecoveryPassword, setNewRecoveryPassword] = useState("");
   const [recoveryFeedback, setRecoveryFeedback] = useState<{ type: "error" | "success"; text: string } | null>(null);
 
-  // Estados do "Agende seu evento"
+  // Estados do "Agende seu evento" (Card #25: Quantidade de pessoas)
   const [clientName, setClientName] = useState("");
   const [clientEmail, setClientEmail] = useState("");
   const [clientPhone, setClientPhone] = useState("");
@@ -51,7 +51,7 @@ export default function LoginAndPublicPortal() {
   const [showClientPassword, setShowClientPassword] = useState(false);
   const [eventTitle, setEventTitle] = useState("");
   const [eventType, setEventType] = useState<string>("Aniversário");
-  const [honoreeName, setHonoreeName] = useState("");
+  const [guestCount, setGuestCount] = useState<string>("30");
   const [eventDate, setEventDate] = useState("");
   const [startTime, setStartTime] = useState("16:00");
   const [endTime, setEndTime] = useState("21:00");
@@ -85,7 +85,6 @@ export default function LoginAndPublicPortal() {
     return `${String(nextH).padStart(2, "0")}:${String(m).padStart(2, "0")}`;
   };
 
-  // LOGIN CONSULTANDO DIRETAMENTE O SUPABASE EM TEMPO REAL
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoginFeedback(null);
@@ -240,8 +239,8 @@ export default function LoginAndPublicPortal() {
       });
       return;
     }
-    if (!honoreeName.trim()) {
-      setScheduleFeedback({ type: "error", text: "Preencha o campo obrigatório 'Para quem é o evento?'." });
+    if (!guestCount.trim() || Number(guestCount) <= 0) {
+      setScheduleFeedback({ type: "error", text: "Informe uma quantidade de pessoas válida." });
       return;
     }
     if (endTime <= startTime) {
@@ -282,11 +281,13 @@ export default function LoginAndPublicPortal() {
       saveUsersToStorage(updatedUsers);
     }
 
+    const formattedGuests = guestCount.includes("pessoa") ? guestCount : `${guestCount} pessoas`;
+
     const newEvent: EventRecord = {
       id: `EV-${Math.floor(1000 + Math.random() * 9000)}`,
-      title: eventTitle || `${eventType} - ${honoreeName}`,
+      title: eventTitle || `${eventType} (${formattedGuests})`,
       eventType,
-      honoreeName,
+      honoreeName: formattedGuests,
       clientName: loggedUser.name,
       clientEmail: loggedUser.email,
       responsibleAdmin: "ADM a confirmar",
@@ -375,40 +376,45 @@ export default function LoginAndPublicPortal() {
 
         <section className="lg:col-span-6 w-full max-w-xl mx-auto">
           <div className="bg-[#111726] border border-slate-800/90 rounded-3xl p-6 sm:p-8 shadow-2xl">
-            <div className="grid grid-cols-3 gap-1.5 bg-[#0A0E17] p-1.5 rounded-2xl border border-slate-800 mb-7">
-              <button
-                type="button"
-                onClick={() => setActiveTab("LOGIN")}
-                className={`py-2.5 px-3 rounded-xl text-xs sm:text-sm transition-all ${
-                  activeTab === "LOGIN"
-                    ? "bg-[#F59E0B] text-slate-950 font-extrabold shadow-lg shadow-amber-500/20"
-                    : "text-slate-400 hover:text-white hover:bg-slate-800/40 font-semibold"
-                }`}
-              >
-                Login
-              </button>
-              <button
-                type="button"
-                onClick={() => setActiveTab("ESQUECI_SENHA")}
-                className={`py-2.5 px-3 rounded-xl text-xs sm:text-sm transition-all ${
-                  activeTab === "ESQUECI_SENHA"
-                    ? "bg-[#F59E0B] text-slate-950 font-extrabold shadow-lg shadow-amber-500/20"
-                    : "text-slate-400 hover:text-white hover:bg-slate-800/40 font-semibold"
-                }`}
-              >
-                Esqueci minha senha
-              </button>
+            {/* CARD #29: Botão "Agende seu evento" à esquerda, separado do bloco de Login */}
+            <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3 mb-7 pb-4 border-b border-slate-800/80">
               <button
                 type="button"
                 onClick={() => setActiveTab("AGENDE_EVENTO")}
-                className={`py-2.5 px-3 rounded-xl text-xs sm:text-sm transition-all ${
+                className={`py-2.5 px-4 rounded-xl text-xs sm:text-sm transition-all border flex items-center justify-center gap-2 ${
                   activeTab === "AGENDE_EVENTO"
-                    ? "bg-[#F59E0B] text-slate-950 font-extrabold shadow-lg shadow-amber-500/20"
-                    : "text-slate-400 hover:text-white hover:bg-slate-800/40 font-semibold"
+                    ? "bg-[#F59E0B] text-slate-950 border-amber-400 font-extrabold shadow-lg shadow-amber-500/20"
+                    : "bg-[#0A0E17] text-amber-400 border-amber-500/40 hover:bg-amber-500/10 font-bold"
                 }`}
               >
-                Agende seu evento
+                <span>📅</span>
+                <span>Agende seu evento</span>
               </button>
+
+              <div className="grid grid-cols-2 gap-1.5 bg-[#0A0E17] p-1.5 rounded-2xl border border-slate-800">
+                <button
+                  type="button"
+                  onClick={() => setActiveTab("LOGIN")}
+                  className={`py-2 px-3.5 rounded-xl text-xs sm:text-sm transition-all ${
+                    activeTab === "LOGIN"
+                      ? "bg-[#F59E0B] text-slate-950 font-extrabold shadow-md"
+                      : "text-slate-400 hover:text-white font-semibold"
+                  }`}
+                >
+                  Login
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setActiveTab("ESQUECI_SENHA")}
+                  className={`py-2 px-3.5 rounded-xl text-xs sm:text-sm transition-all ${
+                    activeTab === "ESQUECI_SENHA"
+                      ? "bg-[#F59E0B] text-slate-950 font-extrabold shadow-md"
+                      : "text-slate-400 hover:text-white font-semibold"
+                  }`}
+                >
+                  Esqueci minha senha
+                </button>
+              </div>
             </div>
 
             {activeTab === "LOGIN" && (
@@ -479,7 +485,7 @@ export default function LoginAndPublicPortal() {
                     className={`px-4 py-3 rounded-xl text-xs font-medium border ${
                       loginFeedback.type === "success"
                         ? "bg-emerald-950/50 border-emerald-500/40 text-emerald-300"
-                        : "bg-amber-950/40 border-amber-500/30 text-amber-400"
+                        : "bg-orange-950/40 border-orange-500/30 text-orange-400"
                     }`}
                   >
                     {loginFeedback.text}
@@ -599,6 +605,7 @@ export default function LoginAndPublicPortal() {
                   />
                 </div>
 
+                {/* CARD #25: Campo "Quantidade de pessoas" no lugar de "Para quem é o evento" */}
                 <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                   <div>
                     <label className="block text-xs font-medium text-slate-300 mb-1">Categoria *</label>
@@ -607,26 +614,30 @@ export default function LoginAndPublicPortal() {
                       required
                       value={eventType}
                       onChange={(e) => setEventType(e.target.value)}
+                      placeholder="Ex: Aniversário"
                       className="w-full bg-[#0A0E17] border border-slate-800 rounded-xl px-3.5 py-3 text-sm text-white"
                     />
                   </div>
                   <div>
-                    <label className="block text-xs font-medium text-slate-300 mb-1">Para quem é? *</label>
+                    <label className="block text-xs font-medium text-slate-300 mb-1">Quantidade de pessoas *</label>
                     <input
-                      type="text"
+                      type="number"
+                      min="1"
                       required
-                      value={honoreeName}
-                      onChange={(e) => setHonoreeName(e.target.value)}
+                      value={guestCount}
+                      onChange={(e) => setGuestCount(e.target.value)}
+                      placeholder="Ex: 50"
                       className="w-full bg-[#0A0E17] border border-slate-800 rounded-xl px-3.5 py-3 text-sm text-white"
                     />
                   </div>
                   <div>
-                    <label className="block text-xs font-medium text-slate-300 mb-1">Título</label>
+                    <label className="block text-xs font-medium text-slate-300 mb-1">Título do evento</label>
                     <input
                       type="text"
                       required
                       value={eventTitle}
                       onChange={(e) => setEventTitle(e.target.value)}
+                      placeholder="Churrasco da Família"
                       className="w-full bg-[#0A0E17] border border-slate-800 rounded-xl px-3.5 py-3 text-sm text-white"
                     />
                   </div>
