@@ -28,7 +28,6 @@ export default function ClientPortalPage() {
   const [daysRemaining, setDaysRemaining] = useState<number>(90);
   const [isLoadingCloud, setIsLoadingCloud] = useState<boolean>(true);
 
-  // Dados sincronizados com o Supabase
   const [currentUser, setCurrentUser] = useState<UserAccount | null>(null);
   const [allUsers, setAllUsers] = useState<UserAccount[]>([]);
   const [allClients, setAllClients] = useState<ClientRecord[]>([]);
@@ -39,15 +38,15 @@ export default function ClientPortalPage() {
   const [isEditingEvent, setIsEditingEvent] = useState<boolean>(false);
   const [editTitle, setEditTitle] = useState("");
   const [editCategory, setEditCategory] = useState("");
-  const [editHonoree, setEditHonoree] = useState("");
+  const [editGuestCount, setEditGuestCount] = useState("");
   const [editDate, setEditDate] = useState("");
   const [editStart, setEditStart] = useState("");
   const [editEnd, setEditEnd] = useState("");
 
-  // Campos de "+ Agendar novo evento"
+  // Campos de "+ Agendar novo evento" (Card #25: Quantidade de pessoas)
   const [title, setTitle] = useState("");
   const [eventType, setEventType] = useState<string>("Festa familiar");
-  const [honoreeName, setHonoreeName] = useState("");
+  const [guestCount, setGuestCount] = useState<string>("40");
   const [eventDate, setEventDate] = useState("");
   const [startTime, setStartTime] = useState("12:00");
   const [endTime, setEndTime] = useState("17:00");
@@ -83,7 +82,6 @@ export default function ClientPortalPage() {
       setAllClients(cloudData.clients);
       setAllEvents(cloudData.events);
 
-      // Atualiza os dados da sessão com a versão mais recente gravada no Supabase
       const freshUser = cloudData.users.find(
         (u) => u.id === sessionUser.id || u.email.toLowerCase() === sessionUser.email.toLowerCase()
       );
@@ -128,11 +126,21 @@ export default function ClientPortalPage() {
     return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase();
   };
 
-  // Criar Novo Evento e gravar na tabela `events` do Supabase
+  // Card #31: Cores padronizadas (Confirmado - Verde; Cancelado - Vermelho; Pendente - Laranja)
+  const getStatusBadgeClasses = (status: EventRecord["status"]) => {
+    if (status === "CONFIRMADO") {
+      return "bg-emerald-500/15 text-emerald-400 border border-emerald-500/40";
+    }
+    if (status === "CANCELADO") {
+      return "bg-red-500/15 text-red-400 border border-red-500/40";
+    }
+    return "bg-orange-500/15 text-orange-400 border border-orange-500/40";
+  };
+
   const handleCreateNewEvent = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!honoreeName.trim()) {
-      setFeedback({ type: "error", text: "Preencha obrigatoriamente 'Para quem é o evento?'." });
+    if (!guestCount.trim()) {
+      setFeedback({ type: "error", text: "Informe obrigatoriamente a 'Quantidade de pessoas'." });
       return;
     }
     if (endTime <= startTime) {
@@ -147,11 +155,13 @@ export default function ClientPortalPage() {
       return;
     }
 
+    const formattedGuests = guestCount.includes("pessoa") ? guestCount : `${guestCount} pessoas`;
+
     const newEv: EventRecord = {
       id: `EV-${Math.floor(1000 + Math.random() * 9000)}`,
-      title: title || `${eventType} - ${honoreeName}`,
+      title: title || `${eventType} (${formattedGuests})`,
       eventType,
-      honoreeName,
+      honoreeName: formattedGuests,
       clientName: myName || currentUser?.name || "Cliente",
       clientEmail: myEmail || currentUser?.email,
       responsibleAdmin: "ADM a confirmar",
@@ -166,10 +176,9 @@ export default function ClientPortalPage() {
     setAllEvents(updated);
     saveEventsToStorage(updated);
     setTitle("");
-    setHonoreeName("");
     setFeedback({
       type: "success",
-      text: "✓ Solicitação salva no Supabase! Clique no card do evento ao lado para ver detalhes ou adicionar ao Google Calendar.",
+      text: "✓ Solicitação salva no Supabase! Clique no card do evento ao lado para ver detalhes.",
     });
   };
 
@@ -178,13 +187,12 @@ export default function ClientPortalPage() {
     setIsEditingEvent(false);
     setEditTitle(ev.title);
     setEditCategory(ev.eventType);
-    setEditHonoree(ev.honoreeName);
+    setEditGuestCount(ev.honoreeName);
     setEditDate(ev.eventDate);
     setEditStart(ev.startTime);
     setEditEnd(ev.endTime);
   };
 
-  // Salvar Edição do Evento no Supabase
   const handleSaveEventEdit = (e: React.FormEvent) => {
     e.preventDefault();
     if (!selectedEvent) return;
@@ -210,11 +218,15 @@ export default function ClientPortalPage() {
       return;
     }
 
+    const formattedGuests = editGuestCount.includes("pessoa")
+      ? editGuestCount
+      : `${editGuestCount} pessoas`;
+
     const updatedEv: EventRecord = {
       ...selectedEvent,
       title: editTitle,
       eventType: editCategory,
-      honoreeName: editHonoree,
+      honoreeName: formattedGuests,
       eventDate: editDate,
       startTime: editStart,
       endTime: editEnd,
@@ -228,7 +240,6 @@ export default function ClientPortalPage() {
     setFeedback({ type: "success", text: "✓ Dados do evento atualizados no Supabase!" });
   };
 
-  // Cancelar Evento no Supabase
   const handleCancelEventFromModal = (id: string) => {
     const updatedList = allEvents.map((ev) =>
       ev.id === id ? { ...ev, status: "CANCELADO" as const } : ev
@@ -239,7 +250,6 @@ export default function ClientPortalPage() {
     setFeedback({ type: "success", text: "Solicitação de evento cancelada no Supabase." });
   };
 
-  // Salvar Dados de "Minha Conta" na tabela `users` do Supabase
   const handleSaveProfile = (e: React.FormEvent) => {
     e.preventDefault();
     if (!currentUser) return;
@@ -287,7 +297,6 @@ export default function ClientPortalPage() {
     });
   };
 
-  // Atualizar Senha RBAC na tabela `users` do Supabase
   const handleUpdatePassword = (e: React.FormEvent) => {
     e.preventDefault();
     if (!currentUser) return;
@@ -405,7 +414,7 @@ export default function ClientPortalPage() {
                   setCurrentUserSession(null);
                   window.location.href = "/";
                 }}
-                className="text-slate-400 hover:text-rose-400 transition"
+                className="text-slate-400 hover:text-red-400 transition"
               >
                 ↪ Sair da conta
               </button>
@@ -430,7 +439,7 @@ export default function ClientPortalPage() {
             </h1>
             <p className="text-xs text-slate-400 mt-0.5">
               {activeTab === "MEUS_EVENTOS"
-                ? "Clique em qualquer card de evento para ver detalhes, editar ou enviar ao Google Calendar."
+                ? "Legenda de status: Confirmado (Verde) · Pendente (Laranja) · Cancelado (Vermelho)"
                 : "Seus dados atualizados e sincronizados no Supabase."}
             </p>
           </div>
@@ -447,7 +456,7 @@ export default function ClientPortalPage() {
             className={`mx-6 mt-5 p-3.5 rounded-xl text-xs flex justify-between items-center border ${
               feedback.type === "success"
                 ? "bg-emerald-950/60 border-emerald-500/40 text-emerald-200"
-                : "bg-rose-950/60 border-rose-500/40 text-rose-200"
+                : "bg-red-950/60 border-red-500/40 text-red-200"
             }`}
           >
             <span>{feedback.text}</span>
@@ -473,15 +482,20 @@ export default function ClientPortalPage() {
                       </span>
                     </div>
                     <div className="space-y-1">
-                      <span className="inline-block text-[10px] font-bold px-2.5 py-0.5 rounded-full bg-amber-500/20 text-amber-300">
-                        ●{" "}
+                      <span
+                        className={`inline-block text-[10px] font-bold px-2.5 py-0.5 rounded-full ${getStatusBadgeClasses(
+                          nextEvent.status
+                        )}`}
+                      >
                         {nextEvent.status === "CONFIRMADO"
-                          ? "Confirmado no Google Calendar"
-                          : "Aguardando confirmação"}
+                          ? "● Confirmado (Verde)"
+                          : nextEvent.status === "CANCELADO"
+                          ? "● Cancelado (Vermelho)"
+                          : "● Pendente (Laranja)"}
                       </span>
                       <h2 className="text-xl font-extrabold text-white">{nextEvent.title}</h2>
                       <p className="text-xs text-slate-300">
-                        Para <strong>{nextEvent.honoreeName}</strong> · {nextEvent.eventDate} das {nextEvent.startTime}{" "}
+                        👥 <strong>{nextEvent.honoreeName}</strong> · {nextEvent.eventDate} das {nextEvent.startTime}{" "}
                         às {nextEvent.endTime} (GMT-3)
                       </p>
                     </div>
@@ -502,6 +516,7 @@ export default function ClientPortalPage() {
                     <p className="text-xs text-slate-400">Mais um motivo para reunir quem você gosta.</p>
                   </div>
 
+                  {/* CARD #25: Quantidade de pessoas */}
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
                     <div>
                       <label className="block text-xs font-medium text-slate-300 mb-1.5">Categoria (Texto livre)</label>
@@ -516,14 +531,15 @@ export default function ClientPortalPage() {
                     </div>
                     <div>
                       <label className="block text-xs font-medium text-slate-300 mb-1.5">
-                        Para quem é o evento? *
+                        Quantidade de pessoas *
                       </label>
                       <input
-                        type="text"
+                        type="number"
+                        min="1"
                         required
-                        value={honoreeName}
-                        onChange={(e) => setHonoreeName(e.target.value)}
-                        placeholder="Família Oliveira"
+                        value={guestCount}
+                        onChange={(e) => setGuestCount(e.target.value)}
+                        placeholder="Ex: 40"
                         className="w-full bg-[#0A0E17] border border-slate-800 rounded-xl px-3.5 py-3 text-xs text-white"
                       />
                     </div>
@@ -579,7 +595,7 @@ export default function ClientPortalPage() {
                       ✓ Data disponível · Sem conflito de horário
                     </div>
                   ) : (
-                    <div className="px-4 py-2.5 rounded-xl bg-rose-950/50 border border-rose-500/30 text-rose-300 text-xs">
+                    <div className="px-4 py-2.5 rounded-xl bg-red-950/50 border border-red-500/30 text-red-300 text-xs">
                       ✕ Horário indisponível nesta data
                     </div>
                   )}
@@ -614,17 +630,14 @@ export default function ClientPortalPage() {
                           className="cursor-pointer bg-[#0A0E17] hover:bg-[#131B2E] border border-slate-800 hover:border-amber-500/50 rounded-2xl p-4 space-y-2 transition group"
                         >
                           <div className="flex items-center justify-between">
+                            {/* CARD #31: Confirmado Verde, Cancelado Vermelho, Pendente Laranja */}
                             <span
-                              className={`inline-block text-[10px] font-bold px-2.5 py-0.5 rounded-full ${
-                                ev.status === "CONFIRMADO"
-                                  ? "bg-emerald-500/15 text-emerald-400"
-                                  : ev.status === "CANCELADO"
-                                  ? "bg-rose-500/15 text-rose-400"
-                                  : "bg-amber-500/15 text-amber-400"
-                              }`}
+                              className={`inline-block text-[10px] font-bold px-2.5 py-0.5 rounded-full ${getStatusBadgeClasses(
+                                ev.status
+                              )}`}
                             >
                               {ev.status === "CONFIRMADO"
-                                ? "✓ Confirmado no Google Calendar"
+                                ? "✓ Confirmado"
                                 : ev.status === "CANCELADO"
                                 ? "✕ Cancelado"
                                 : "● Pendente"}
@@ -640,7 +653,7 @@ export default function ClientPortalPage() {
                             📅 {ev.eventDate} · 🕒 {ev.startTime} - {ev.endTime} (GMT-3)
                           </p>
                           <p className="text-xs text-slate-500">
-                            Para: <strong className="text-slate-300">{ev.honoreeName}</strong> · Resp.:{" "}
+                            Quantidade: <strong className="text-slate-300">{ev.honoreeName}</strong> · Resp.:{" "}
                             {ev.responsibleAdmin}
                           </p>
                         </div>
@@ -819,12 +832,18 @@ export default function ClientPortalPage() {
               <div className="space-y-4 text-xs">
                 <div className="grid grid-cols-2 gap-3 bg-[#0A0E17] border border-slate-800 p-4 rounded-2xl">
                   <div>
-                    <p className="text-slate-500">Para quem é o evento</p>
+                    <p className="text-slate-500">Quantidade de pessoas</p>
                     <p className="font-bold text-white text-sm mt-0.5">{selectedEvent.honoreeName}</p>
                   </div>
                   <div>
                     <p className="text-slate-500">Status da Reserva</p>
-                    <p className="font-bold text-amber-400 text-sm mt-0.5">{selectedEvent.status}</p>
+                    <span
+                      className={`inline-block mt-1 text-[10px] font-bold px-2.5 py-0.5 rounded-full ${getStatusBadgeClasses(
+                        selectedEvent.status
+                      )}`}
+                    >
+                      {selectedEvent.status}
+                    </span>
                   </div>
                   <div>
                     <p className="text-slate-500">Data e Horário (GMT-3)</p>
@@ -865,7 +884,7 @@ export default function ClientPortalPage() {
                       <button
                         type="button"
                         onClick={() => handleCancelEventFromModal(selectedEvent.id)}
-                        className="bg-rose-950/70 hover:bg-rose-900 text-rose-200 border border-rose-800 font-bold py-3 px-4 rounded-xl transition"
+                        className="bg-red-950/70 hover:bg-red-900 text-red-200 border border-red-800 font-bold py-3 px-4 rounded-xl transition"
                       >
                         Cancelar reserva
                       </button>
@@ -897,12 +916,12 @@ export default function ClientPortalPage() {
                     />
                   </div>
                   <div>
-                    <label className="block text-slate-300 mb-1">Para quem é o evento?</label>
+                    <label className="block text-slate-300 mb-1">Quantidade de pessoas</label>
                     <input
                       type="text"
                       required
-                      value={editHonoree}
-                      onChange={(e) => setEditHonoree(e.target.value)}
+                      value={editGuestCount}
+                      onChange={(e) => setEditGuestCount(e.target.value)}
                       className="w-full bg-[#0A0E17] border border-slate-800 rounded-xl px-3.5 py-2.5 text-white"
                     />
                   </div>
