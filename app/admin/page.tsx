@@ -13,7 +13,9 @@ import {
   deleteBackupLogFromSupabase,
   resetDatabaseToAdminOnly,
   generateGoogleCalendarUrl,
+  getCurrentUserSession,
   setCurrentUserSession,
+  DEFAULT_ADMIN_USER,
   StaffMember,
   ClientRecord,
   EventRecord,
@@ -24,10 +26,27 @@ import {
 
 type AdminTab = "DASHBOARD" | "EVENTOS" | "CADASTROS" | "BACKUP";
 
-// CARD #28: Verifica se o evento pertence ao mês atual (AAAA-MM)
-function isDateInCurrentMonth(dateStr: string, todayStr: string): boolean {
-  if (!dateStr || !todayStr) return false;
-  return dateStr.slice(0, 7) === todayStr.slice(0, 7);
+const MONTH_NAMES_PT = [
+  { num: "01", name: "Janeiro" },
+  { num: "02", name: "Fevereiro" },
+  { num: "03", name: "Março" },
+  { num: "04", name: "Abril" },
+  { num: "05", name: "Maio" },
+  { num: "06", name: "Junho" },
+  { num: "07", name: "Julho" },
+  { num: "08", name: "Agosto" },
+  { num: "09", name: "Setembro" },
+  { num: "10", name: "Outubro" },
+  { num: "11", name: "Novembro" },
+  { num: "12", name: "Dezembro" },
+];
+
+const AVAILABLE_YEARS = ["2025", "2026", "2027", "2028"];
+
+function formatYearMonthLabel(ym: string): string {
+  const [y, m] = ym.split("-");
+  const found = MONTH_NAMES_PT.find((item) => item.num === m);
+  return found ? `${found.name} de ${y}` : ym;
 }
 
 function formatIsoDatePtBr(iso?: string): string {
@@ -37,7 +56,6 @@ function formatIsoDatePtBr(iso?: string): string {
   return d.toLocaleDateString("pt-BR");
 }
 
-// CARDS #30 e #32: Cores padronizadas (Confirmado - Verde; Cancelado - Vermelho; Pendente - Laranja)
 function getStatusBadgeClasses(status: EventRecord["status"]): string {
   if (status === "CONFIRMADO") {
     return "bg-emerald-500/15 text-emerald-400 border border-emerald-500/40";
@@ -48,9 +66,18 @@ function getStatusBadgeClasses(status: EventRecord["status"]): string {
   return "bg-orange-500/15 text-orange-400 border border-orange-500/40";
 }
 
+// Verifica se um profissional escalado já consta na lista `confirmedStaff` do evento
+function isStaffMemberConfirmed(memberName: string, confirmedList?: string[]): boolean {
+  if (!confirmedList || confirmedList.length === 0) return false;
+  const cleanMember = memberName.trim().toLowerCase();
+  return confirmedList.some((c) => c.trim().toLowerCase() === cleanMember);
+}
+
 export default function AdminPortalPage() {
   const [activeTab, setActiveTab] = useState<AdminTab>("DASHBOARD");
   const [todayGmt3, setTodayGmt3] = useState<string>("2026-11-18");
+  const [selectedYearMonth, setSelectedYearMonth] = useState<string>("2026-11");
+  const [currentUser, setCurrentUser] = useState<UserAccount>(DEFAULT_ADMIN_USER);
   const [feedback, setFeedback] = useState<{ type: "success" | "error"; text: string } | null>(null);
 
   const [users, setUsers] = useState<UserAccount[]>([]);
@@ -59,7 +86,7 @@ export default function AdminPortalPage() {
   const [events, setEvents] = useState<EventRecord[]>([]);
   const [backupLogs, setBackupLogs] = useState<BackupLogRecord[]>([]);
 
-  // CARD #24: Estado para esconder/mostrar o Modal de "Novo agendamento rápido" ao clicar no botão do topo
+  // Modal de "Novo agendamento rápido"
   const [showNewEventModal, setShowNewEventModal] = useState<boolean>(false);
 
   // Estados de Gestão de Eventos
@@ -68,7 +95,7 @@ export default function AdminPortalPage() {
   const [selectedCalendarDay, setSelectedCalendarDay] = useState<string | null>(null);
   const [evTitle, setEvTitle] = useState("");
   const [evCategoryText, setEvCategoryText] = useState("");
-  const [evGuestCount, setEvGuestCount] = useState("40"); // Card #25: Quantidade de pessoas
+  const [evGuestCount, setEvGuestCount] = useState("40");
   const [evClient, setEvClient] = useState("");
   const [evAdmin, setEvAdmin] = useState("Administrador Da Hora");
   const [evDate, setEvDate] = useState("");
@@ -76,7 +103,7 @@ export default function AdminPortalPage() {
   const [evEnd, setEvEnd] = useState("21:00");
   const [evStaffSelected, setEvStaffSelected] = useState<string[]>([]);
 
-  // Modal de Edição de Escala / Dados do Evento
+  // Modal de Edição de Escala / Dados do Evento + Confirmação de Presença
   const [editingEvent, setEditingEvent] = useState<EventRecord | null>(null);
   const [modTitle, setModTitle] = useState("");
   const [modCategory, setModCategory] = useState("");
@@ -88,6 +115,7 @@ export default function AdminPortalPage() {
   const [modEnd, setModEnd] = useState("");
   const [modStatus, setModStatus] = useState<EventRecord["status"]>("CONFIRMADO");
   const [modTeam, setModTeam] = useState<string[]>([]);
+  const [modConfirmedStaff, setModConfirmedStaff] = useState<string[]>([]);
   const [modNotes, setModNotes] = useState("");
 
   // Estados de Cadastros para os 4 Perfis RBAC
@@ -105,7 +133,7 @@ export default function AdminPortalPage() {
   const [roleFilterTab, setRoleFilterTab] = useState<"TODOS" | UserRole>("TODOS");
   const [personSearch, setPersonSearch] = useState("");
 
-  // Modal de Edição de Usuário Cadastrado
+  // Modal de Edição de Conta
   const [editingUser, setEditingUser] = useState<UserAccount | null>(null);
   const [editUserName, setEditUserName] = useState("");
   const [editUserEmail, setEditUserEmail] = useState("");
@@ -119,7 +147,23 @@ export default function AdminPortalPage() {
   useEffect(() => {
     const now = getNowGmt3();
     setTodayGmt3(now.dateStr);
+    setSelectedYearMonth(now.dateStr.slice(0, 7));
     setEvDate(now.dateStr);
+
+    const session = getCurrentUserSession();
+    if (session) {
+      // Se não for ADM nem EQUIPE_INTERNA, redireciona para a área correta
+      if (session.role === "CLIENTE") {
+        window.location.href = "/cliente";
+        return;
+      }
+      if (session.role === "EQUIPE_EXTERNA") {
+        window.location.href = "/equipe";
+        return;
+      }
+      setCurrentUser(session);
+      setEvAdmin(session.name);
+    }
 
     fetchAllFromSupabase().then((data) => {
       setUsers(data.users);
@@ -127,13 +171,72 @@ export default function AdminPortalPage() {
       setClients(data.clients);
       setStaffList(data.staff);
       setBackupLogs(data.backupLogs);
+
+      if (session) {
+        const fresh = data.users.find(
+          (u) => u.id === session.id || u.email.toLowerCase() === session.email.toLowerCase()
+        );
+        if (fresh) {
+          setCurrentUser(fresh);
+          setCurrentUserSession(fresh);
+        }
+      }
     });
   }, []);
 
-  // CARD #28: Eventos do Mês Atual (em vez de semana)
-  const eventsThisMonth = events.filter((e) => isDateInCurrentMonth(e.eventDate, todayGmt3));
+  // REGRA RBAC: EQUIPE_INTERNA tem acesso a tudo, menos BACKUP
+  const isInternalStaffUser = currentUser.role === "EQUIPE_INTERNA";
+  const canAccessBackup = currentUser.role === "ADM";
 
-  // CARD #27: Contadores exatos de eventos por Status
+  useEffect(() => {
+    if (!canAccessBackup && activeTab === "BACKUP") {
+      setActiveTab("DASHBOARD");
+    }
+  }, [canAccessBackup, activeTab]);
+
+  // NAVEGAÇÃO POR TODOS OS MESES DO ANO (Janeiro a Dezembro)
+  const [selYear, selMonth] = selectedYearMonth.split("-");
+
+  const handleStepMonth = (delta: number) => {
+    const y = Number(selYear || 2026);
+    const m = Number(selMonth || 11);
+    const d = new Date(y, m - 1 + delta, 1);
+    const nextYm = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+    setSelectedYearMonth(nextYm);
+    setSelectedCalendarDay(null);
+    setEvDate(`${nextYm}-01`);
+  };
+
+  const handleSelectMonthNum = (newMonthNum: string) => {
+    const nextYm = `${selYear}-${newMonthNum}`;
+    setSelectedYearMonth(nextYm);
+    setSelectedCalendarDay(null);
+    setEvDate(`${nextYm}-01`);
+  };
+
+  const handleSelectYear = (newYear: string) => {
+    const nextYm = `${newYear}-${selMonth}`;
+    setSelectedYearMonth(nextYm);
+    setSelectedCalendarDay(null);
+    setEvDate(`${nextYm}-01`);
+  };
+
+  const handleResetToCurrentMonth = () => {
+    const curYm = todayGmt3.slice(0, 7);
+    setSelectedYearMonth(curYm);
+    setSelectedCalendarDay(null);
+    setEvDate(todayGmt3);
+  };
+
+  // Eventos filtrados pelo mês selecionado (`selectedYearMonth`)
+  const eventsInSelectedMonth = events.filter((e) => e.eventDate.slice(0, 7) === selectedYearMonth);
+
+  // Contadores de eventos por Status (no mês selecionado e no geral)
+  const countMonthAll = eventsInSelectedMonth.length;
+  const countMonthPending = eventsInSelectedMonth.filter((e) => e.status === "PENDENTE").length;
+  const countMonthConfirmed = eventsInSelectedMonth.filter((e) => e.status === "CONFIRMADO").length;
+  const countMonthCancelled = eventsInSelectedMonth.filter((e) => e.status === "CANCELADO").length;
+
   const countAll = events.length;
   const countPending = events.filter((e) => e.status === "PENDENTE").length;
   const countConfirmed = events.filter((e) => e.status === "CONFIRMADO").length;
@@ -143,6 +246,36 @@ export default function AdminPortalPage() {
   const phoneValidation = validateAnatelPhone(cadPhone);
   const cadPwCheck = validatePasswordRbac(cadPassword);
   const editPwCheck = validatePasswordRbac(editUserNewPassword);
+
+  // Alternar confirmação de presença de um membro (interno ou externo) num evento e gravar no Supabase
+  const handleToggleStaffPresenceOnEvent = (eventId: string, memberName: string) => {
+    const updated = events.map((ev) => {
+      if (ev.id !== eventId) return ev;
+      const currentConfirmed = ev.confirmedStaff || [];
+      const alreadyConfirmed = isStaffMemberConfirmed(memberName, currentConfirmed);
+
+      const nextConfirmed = alreadyConfirmed
+        ? currentConfirmed.filter((c) => c.trim().toLowerCase() !== memberName.trim().toLowerCase())
+        : [...currentConfirmed, memberName];
+
+      const nextTeam = ev.supportTeam.some((m) => m.trim().toLowerCase() === memberName.trim().toLowerCase())
+        ? ev.supportTeam
+        : [...ev.supportTeam.filter((m) => m !== "A definir pelo ADM" && m !== "Sem equipe escalada"), memberName];
+
+      return {
+        ...ev,
+        supportTeam: nextTeam,
+        confirmedStaff: nextConfirmed,
+      };
+    });
+
+    setEvents(updated);
+    saveEventsToStorage(updated);
+    setFeedback({
+      type: "success",
+      text: `✓ Status de presença de "${memberName}" atualizado na escala e salvo no Supabase!`,
+    });
+  };
 
   const syncAllTablesFromUsers = (updatedUsers: UserAccount[]) => {
     setUsers(updatedUsers);
@@ -314,7 +447,6 @@ export default function AdminPortalPage() {
     });
   };
 
-  // CARDS #22 e #26: Ao confirmar/aprovar um evento (no Dashboard ou na Gestão de Eventos), coloca na agenda automaticamente
   const handleApproveAndSyncGcal = (id: string) => {
     const targetEv = events.find((ev) => ev.id === id);
     const updated = events.map((ev) =>
@@ -323,7 +455,7 @@ export default function AdminPortalPage() {
             ...ev,
             status: "CONFIRMADO" as const,
             responsibleAdmin: ev.responsibleAdmin.includes("confirmar")
-              ? "Administrador Da Hora"
+              ? currentUser.name
               : ev.responsibleAdmin,
             googleCalendarEventId: `gcal_auto_${Math.floor(1000 + Math.random() * 9000)}`,
           }
@@ -333,12 +465,15 @@ export default function AdminPortalPage() {
     saveEventsToStorage(updated);
 
     if (targetEv) {
+      setSelectedYearMonth(targetEv.eventDate.slice(0, 7));
       setEvDate(targetEv.eventDate);
     }
 
     setFeedback({
       type: "success",
-      text: `✓ Evento "${targetEv?.title || id}" confirmado e adicionado automaticamente na agenda do mês!`,
+      text: `✓ Evento "${targetEv?.title || id}" confirmado e adicionado automaticamente na agenda de ${
+        targetEv ? formatYearMonthLabel(targetEv.eventDate.slice(0, 7)) : ""
+      }!`,
     });
   };
 
@@ -361,6 +496,7 @@ export default function AdminPortalPage() {
     setModEnd(ev.endTime);
     setModStatus(ev.status);
     setModTeam(ev.supportTeam || []);
+    setModConfirmedStaff(ev.confirmedStaff || []);
     setModNotes(ev.notes || "");
   };
 
@@ -376,6 +512,10 @@ export default function AdminPortalPage() {
       ? modGuestCount
       : `${modGuestCount} pessoas`;
 
+    const cleanedConfirmed = modConfirmedStaff.filter((c) =>
+      modTeam.some((m) => m.trim().toLowerCase() === c.trim().toLowerCase())
+    );
+
     const updatedEv: EventRecord = {
       ...editingEvent,
       title: modTitle,
@@ -388,17 +528,21 @@ export default function AdminPortalPage() {
       endTime: modEnd,
       status: modStatus,
       supportTeam: modTeam.length > 0 ? modTeam : ["Sem equipe escalada"],
+      confirmedStaff: cleanedConfirmed,
       notes: modNotes,
     };
 
     const updatedList = events.map((ev) => (ev.id === editingEvent.id ? updatedEv : ev));
     setEvents(updatedList);
     saveEventsToStorage(updatedList);
+    setSelectedYearMonth(modDate.slice(0, 7));
     setEditingEvent(null);
-    setFeedback({ type: "success", text: "✓ Dados e escala do evento atualizados na agenda e no Supabase!" });
+    setFeedback({
+      type: "success",
+      text: "✓ Dados, escala e confirmações da equipe atualizados na agenda e no Supabase!",
+    });
   };
 
-  // CARD #21: Ao adicionar um evento como ADM, ele adiciona na agenda automaticamente como CONFIRMADO
   const handleCreateManualEvent = (e: React.FormEvent) => {
     e.preventDefault();
     if (!evCategoryText.trim()) {
@@ -437,13 +581,14 @@ export default function AdminPortalPage() {
       eventType: evCategoryText.trim(),
       honoreeName: formattedGuests,
       clientName: evClient || "Cliente Da Hora",
-      responsibleAdmin: evAdmin,
+      responsibleAdmin: evAdmin || currentUser.name,
       eventDate: evDate,
       startTime: evStart,
       endTime: evEnd,
       status: "CONFIRMADO",
       googleCalendarEventId: `gcal_auto_${Math.floor(1000 + Math.random() * 9000)}`,
       supportTeam: evStaffSelected.length > 0 ? evStaffSelected : ["Equipe padrão"],
+      confirmedStaff: [],
     };
 
     const updated = [newEv, ...events];
@@ -454,14 +599,18 @@ export default function AdminPortalPage() {
     setEvGuestCount("40");
     setEvClient("");
     setShowNewEventModal(false);
+    setSelectedYearMonth(evDate.slice(0, 7));
     setSelectedCalendarDay(evDate);
     setFeedback({
       type: "success",
-      text: `✓ Evento "${newEv.title}" adicionado automaticamente na agenda do dia ${newEv.eventDate}!`,
+      text: `✓ Evento "${newEv.title}" adicionado automaticamente na agenda de ${formatYearMonthLabel(
+        evDate.slice(0, 7)
+      )}!`,
     });
   };
 
   const handleDownloadBackup = async (scope: "Usuários" | "Eventos" | "Completo", format: "JSON" | "SQL") => {
+    if (!canAccessBackup) return;
     const now = getNowGmt3();
     let content = "";
     const filename = `backup_${scope.toLowerCase()}_${now.dateStr}.${format.toLowerCase()}`;
@@ -473,7 +622,7 @@ export default function AdminPortalPage() {
           version: "1.0.0",
           scope,
           exportedAtGmt3: now.formattedPtBr,
-          exportedByAdmin: "Administrador Da Hora",
+          exportedByAdmin: currentUser.name,
         },
         backupData: {
           ...(scope !== "Eventos" ? { users, clients, staffMembers: staffList } : {}),
@@ -508,7 +657,7 @@ export default function AdminPortalPage() {
       scope,
       format,
       exportedAtGmt3: `${now.dateStr.split("-").reverse().join("/")} ${now.timeStr}`,
-      exportedBy: "Administrador Da Hora",
+      exportedBy: currentUser.name,
     };
 
     setBackupLogs([newLog, ...backupLogs]);
@@ -517,6 +666,7 @@ export default function AdminPortalPage() {
   };
 
   const handleDeleteLastBackup = async () => {
+    if (!canAccessBackup) return;
     if (backupLogs.length === 0) {
       setFeedback({ type: "error", text: "Não há backups no histórico para excluir." });
       return;
@@ -528,6 +678,7 @@ export default function AdminPortalPage() {
   };
 
   const handleResetSystemFromBackupTab = async () => {
+    if (!canAccessBackup) return;
     const clean = await resetDatabaseToAdminOnly();
     setUsers(clean.users);
     setEvents(clean.events);
@@ -553,7 +704,9 @@ export default function AdminPortalPage() {
     return matchRole && matchQuery;
   });
 
+  // Filtra eventos da Gestão pelo Mês/Ano selecionado (ou dia clicado), Status e Busca
   const filteredEvents = events.filter((ev) => {
+    const matchesMonth = ev.eventDate.slice(0, 7) === selectedYearMonth;
     const matchesStatus = statusFilter === "TODOS" || ev.status === statusFilter;
     const matchesDay = !selectedCalendarDay || ev.eventDate === selectedCalendarDay;
     const matchesQuery =
@@ -562,13 +715,154 @@ export default function AdminPortalPage() {
       ev.honoreeName.toLowerCase().includes(searchQuery.toLowerCase()) ||
       ev.eventType.toLowerCase().includes(searchQuery.toLowerCase()) ||
       ev.eventDate.includes(searchQuery);
-    return matchesStatus && matchesDay && matchesQuery;
+    return matchesMonth && matchesStatus && matchesDay && matchesQuery;
   });
 
-  const currentYearMonth = (evDate || todayGmt3).slice(0, 7);
-  const [calYear, calMonth] = currentYearMonth.split("-").map(Number);
+  const [calYear, calMonth] = selectedYearMonth.split("-").map(Number);
   const daysInMonth = new Date(calYear || 2026, calMonth || 11, 0).getDate();
   const firstWeekday = new Date(calYear || 2026, (calMonth || 11) - 1, 1).getDay();
+
+  // Abas visíveis conforme RBAC (Equipe Interna tem acesso a tudo, menos Backup)
+  const visibleMenuTabs = [
+    { id: "DASHBOARD", label: "Dashboard (Mensal)", icon: "⊞" },
+    { id: "EVENTOS", label: "Gestão de eventos", icon: "📅" },
+    { id: "CADASTROS", label: "Cadastros (RBAC)", icon: "👥" },
+    ...(canAccessBackup ? [{ id: "BACKUP", label: "Backup e governança", icon: "🛡️" }] : []),
+  ];
+
+  // Componente reutilizável de Barra de Navegação de Todos os Meses do Ano
+  const renderMonthNavigationBar = () => (
+    <div className="bg-[#111726] border border-slate-800/90 rounded-2xl p-3.5 flex flex-wrap items-center justify-between gap-3">
+      <div className="flex items-center gap-2">
+        <button
+          type="button"
+          onClick={() => handleStepMonth(-1)}
+          className="bg-[#0A0E17] hover:bg-slate-800 text-slate-200 border border-slate-800 px-3 py-2 rounded-xl text-xs font-bold transition"
+        >
+          ◀ Mês anterior
+        </button>
+        <button
+          type="button"
+          onClick={() => handleStepMonth(1)}
+          className="bg-[#0A0E17] hover:bg-slate-800 text-slate-200 border border-slate-800 px-3 py-2 rounded-xl text-xs font-bold transition"
+        >
+          Próximo mês ▶
+        </button>
+      </div>
+
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="text-[11px] font-bold uppercase tracking-wider text-amber-400 mr-1">
+          📅 Período:
+        </span>
+        <select
+          value={selMonth}
+          onChange={(e) => handleSelectMonthNum(e.target.value)}
+          className="bg-[#0A0E17] border border-slate-700 rounded-xl px-3 py-2 text-xs font-bold text-white"
+        >
+          {MONTH_NAMES_PT.map((m) => (
+            <option key={m.num} value={m.num}>
+              {m.num} - {m.name}
+            </option>
+          ))}
+        </select>
+
+        <select
+          value={selYear}
+          onChange={(e) => handleSelectYear(e.target.value)}
+          className="bg-[#0A0E17] border border-slate-700 rounded-xl px-3 py-2 text-xs font-bold text-white"
+        >
+          {AVAILABLE_YEARS.map((yr) => (
+            <option key={yr} value={yr}>
+              {yr}
+            </option>
+          ))}
+        </select>
+
+        <button
+          type="button"
+          onClick={handleResetToCurrentMonth}
+          className="bg-amber-500/15 hover:bg-amber-500/25 text-amber-300 border border-amber-500/30 px-3 py-2 rounded-xl text-xs font-bold transition"
+        >
+          Hoje (Mês atual)
+        </button>
+      </div>
+    </div>
+  );
+
+  // Componente que renderiza os Emblemas de Confirmação da Equipe Interna e Externa
+  const renderStaffConfirmationBadges = (ev: EventRecord) => {
+    const validTeam = (ev.supportTeam || []).filter(
+      (m) => m !== "A definir pelo ADM" && m !== "Sem equipe escalada"
+    );
+    const confirmedCount = validTeam.filter((m) => isStaffMemberConfirmed(m, ev.confirmedStaff)).length;
+    const isCurrentUserConfirmed = isStaffMemberConfirmed(currentUser.name, ev.confirmedStaff);
+
+    return (
+      <div className="space-y-2 pt-1.5" onClick={(e) => e.stopPropagation()}>
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <span className="text-[11px] font-bold text-slate-400">
+            👥 Confirmação da Equipe (Interna/Externa):{" "}
+            <strong className={confirmedCount === validTeam.length && validTeam.length > 0 ? "text-emerald-400" : "text-amber-400"}>
+              {confirmedCount} de {validTeam.length} confirmado(s)
+            </strong>
+          </span>
+
+          {isInternalStaffUser && (
+            <button
+              type="button"
+              onClick={() => handleToggleStaffPresenceOnEvent(ev.id, currentUser.name)}
+              className={`text-[11px] font-bold px-2.5 py-1 rounded-lg border transition ${
+                isCurrentUserConfirmed
+                  ? "bg-emerald-500/20 text-emerald-300 border-emerald-500/40"
+                  : "bg-amber-500 text-slate-950 border-amber-400"
+              }`}
+            >
+              {isCurrentUserConfirmed ? "✓ Minha presença confirmada" : "✓ Confirmar minha presença"}
+            </button>
+          )}
+        </div>
+
+        {validTeam.length === 0 ? (
+          <p className="text-[11px] text-slate-500 italic">
+            Nenhum profissional escalado ainda. Clique em &quot;Editar escala&quot; para alocar a equipe.
+          </p>
+        ) : (
+          <div className="flex flex-wrap gap-1.5">
+            {validTeam.map((memberName) => {
+              const confirmed = isStaffMemberConfirmed(memberName, ev.confirmedStaff);
+              const staffObj = staffList.find(
+                (s) => s.name.trim().toLowerCase() === memberName.trim().toLowerCase()
+              );
+              const typeTag =
+                staffObj?.staffType === "INTERNA"
+                  ? "Interna"
+                  : staffObj?.staffType === "EXTERNA_TERCEIRO"
+                  ? "Externa"
+                  : "Equipe";
+
+              return (
+                <button
+                  key={memberName}
+                  type="button"
+                  title="Clique para alternar a confirmação de presença deste profissional"
+                  onClick={() => handleToggleStaffPresenceOnEvent(ev.id, memberName)}
+                  className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11px] font-semibold border transition ${
+                    confirmed
+                      ? "bg-emerald-500/15 text-emerald-300 border-emerald-500/40 hover:bg-emerald-500/25"
+                      : "bg-orange-500/15 text-orange-300 border-orange-500/40 hover:bg-orange-500/25"
+                  }`}
+                >
+                  <span>{confirmed ? "✓" : "⏳"}</span>
+                  <span>{memberName}</span>
+                  <span className="opacity-75 text-[10px]">({typeTag} · {confirmed ? "Confirmado" : "Aguardando"})</span>
+                </button>
+              );
+            })}
+          </div>
+        )}
+      </div>
+    );
+  };
 
   return (
     <div className="min-h-screen bg-[#0A0E17] text-slate-100 flex flex-col lg:flex-row font-sans">
@@ -588,14 +882,9 @@ export default function AdminPortalPage() {
 
           <div className="space-y-1.5">
             <p className="px-3 text-[10px] font-bold tracking-[0.16em] text-slate-500 uppercase mb-2">
-              PAINEL DA FAMÍLIA
+              {isInternalStaffUser ? "PAINEL EQUIPE INTERNA" : "PAINEL DA FAMÍLIA (ADM)"}
             </p>
-            {[
-              { id: "DASHBOARD", label: "Dashboard (Mensal)", icon: "⊞" },
-              { id: "EVENTOS", label: "Gestão de eventos", icon: "📅" },
-              { id: "CADASTROS", label: "Cadastros (RBAC)", icon: "👥" },
-              { id: "BACKUP", label: "Backup e governança", icon: "🛡️" },
-            ].map((item) => (
+            {visibleMenuTabs.map((item) => (
               <button
                 key={item.id}
                 onClick={() => setActiveTab(item.id as AdminTab)}
@@ -618,17 +907,23 @@ export default function AdminPortalPage() {
               <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" /> ✓ Conectado
             </span>
             <p className="text-xs font-bold text-white">Supabase & Google Calendar</p>
-            <p className="text-[11px] text-slate-400">Agenda sincronizada automaticamente.</p>
+            <p className="text-[11px] text-slate-400">
+              {isInternalStaffUser
+                ? "Acesso completo de gestão (Exceto Backup)."
+                : "Acesso total Administrador."}
+            </p>
           </div>
 
           <div className="border-t border-slate-800/80 pt-4 space-y-3">
             <div className="flex items-center gap-3">
               <div className="w-9 h-9 rounded-full bg-amber-500/20 border border-amber-500/40 flex items-center justify-center text-amber-300 font-bold text-xs">
-                AD
+                {currentUser.name.slice(0, 2).toUpperCase()}
               </div>
-              <div className="leading-tight">
-                <p className="text-xs font-bold text-white">Administrador Da Hora</p>
-                <p className="text-[11px] text-slate-400">Perfil ADM</p>
+              <div className="leading-tight truncate">
+                <p className="text-xs font-bold text-white truncate">{currentUser.name}</p>
+                <p className="text-[11px] text-amber-400">
+                  {isInternalStaffUser ? "🏠 Equipe Interna" : "🛡️ Perfil ADM"}
+                </p>
               </div>
             </div>
             <button
@@ -650,26 +945,27 @@ export default function AdminPortalPage() {
         <header className="border-b border-slate-800/80 px-6 py-5 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
           <div>
             <p className="text-[10px] font-bold tracking-[0.18em] text-amber-500 uppercase">
-              ADMINISTRAÇÃO DO ESPAÇO · SUPABASE CLOUD
+              {isInternalStaffUser
+                ? "GESTÃO OPERACIONAL · EQUIPE INTERNA"
+                : "ADMINISTRAÇÃO DO ESPAÇO · SUPABASE CLOUD"}
             </p>
             <h1 className="text-2xl sm:text-3xl font-extrabold text-white mt-0.5">
-              {activeTab === "DASHBOARD" && "Dashboard do Mês"}
-              {activeTab === "EVENTOS" && "Gestão de eventos"}
+              {activeTab === "DASHBOARD" && `Dashboard — ${formatYearMonthLabel(selectedYearMonth)}`}
+              {activeTab === "EVENTOS" && `Gestão de eventos — ${formatYearMonthLabel(selectedYearMonth)}`}
               {activeTab === "CADASTROS" && "Cadastros por Perfil RBAC"}
-              {activeTab === "BACKUP" && "Backup e governança"}
+              {activeTab === "BACKUP" && canAccessBackup && "Backup e governança"}
             </h1>
             <p className="text-xs text-slate-400 mt-0.5">
               {activeTab === "DASHBOARD" &&
-                "Visão mensal completa · Cores: Confirmado (Verde), Pendente (Laranja), Cancelado (Vermelho)."}
+                "Navegue por todos os meses do ano e acompanhe a confirmação da equipe interna e externa."}
               {activeTab === "EVENTOS" &&
-                "Agenda cobrindo 100% da área. Use o botão no topo para abrir um Novo Agendamento Rápido."}
+                "Clique no badge de qualquer membro escalado para confirmar/alternar a presença na escala."}
               {activeTab === "CADASTROS" &&
                 "Qualquer conta criada aqui é gravada no Supabase e já pode fazer login imediatamente."}
               {activeTab === "BACKUP" && "Exportação segura, exclusão de último backup e reset."}
             </p>
           </div>
 
-          {/* CARD #24: Botão na parte de cima para abrir o modal de Novo Agendamento Rápido */}
           {(activeTab === "DASHBOARD" || activeTab === "EVENTOS") && (
             <button
               type="button"
@@ -697,9 +993,11 @@ export default function AdminPortalPage() {
         )}
 
         <main className="p-6 space-y-6 flex-1">
-          {/* ABA 1: DASHBOARD MENSAL (Card #28 e Card #32) */}
+          {/* ABA 1: DASHBOARD MENSAL COM NAVEGAÇÃO POR TODOS OS MESES E CONFIRMAÇÃO DA EQUIPE */}
           {activeTab === "DASHBOARD" && (
             <div className="space-y-6">
+              {renderMonthNavigationBar()}
+
               <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4">
                 <div
                   onClick={() => {
@@ -709,15 +1007,15 @@ export default function AdminPortalPage() {
                   className="cursor-pointer bg-[#111726] hover:bg-[#161E31] border border-slate-800/90 rounded-2xl p-5 border-t-2 border-t-amber-500 transition"
                 >
                   <div className="flex justify-between items-center text-xs text-slate-400">
-                    <span>Eventos no mês</span>
+                    <span>Eventos em {formatYearMonthLabel(selectedYearMonth)}</span>
                     <span className="text-[10px] font-bold bg-amber-500/15 text-amber-400 px-2 py-0.5 rounded">
-                      MÊS ATUAL ({currentYearMonth})
+                      {selectedYearMonth}
                     </span>
                   </div>
                   <p className="text-4xl font-extrabold text-white mt-2">
-                    {String(eventsThisMonth.length).padStart(2, "0")}
+                    {String(countMonthAll).padStart(2, "0")}
                   </p>
-                  <p className="text-xs text-amber-400/80 mt-1">Ver agenda completa do mês →</p>
+                  <p className="text-xs text-amber-400/80 mt-1">Total no ano: {countAll} evento(s) →</p>
                 </div>
 
                 <div
@@ -732,7 +1030,7 @@ export default function AdminPortalPage() {
                     <span className="text-emerald-400 font-bold">✓</span>
                   </div>
                   <p className="text-4xl font-extrabold text-emerald-400 mt-2">
-                    {String(eventsThisMonth.filter((e) => e.status === "CONFIRMADO").length).padStart(2, "0")}
+                    {String(countMonthConfirmed).padStart(2, "0")}
                   </p>
                   <p className="text-xs text-emerald-400/80 mt-1">Total geral: {countConfirmed} confirmado(s) →</p>
                 </div>
@@ -745,13 +1043,13 @@ export default function AdminPortalPage() {
                   className="cursor-pointer bg-[#111726] hover:bg-[#161E31] border border-slate-800/90 rounded-2xl p-5 border-t-2 border-t-orange-500 transition"
                 >
                   <div className="flex justify-between items-center text-xs text-slate-400">
-                    <span>Pendentes (Laranja)</span>
+                    <span>Pendentes no mês (Laranja)</span>
                     <span className="text-orange-400 font-bold">●</span>
                   </div>
                   <p className="text-4xl font-extrabold text-orange-400 mt-2">
-                    {String(countPending).padStart(2, "0")}
+                    {String(countMonthPending).padStart(2, "0")}
                   </p>
-                  <p className="text-xs text-orange-400/80 mt-1">Aprovar solicitações →</p>
+                  <p className="text-xs text-orange-400/80 mt-1">Total pendentes: {countPending} →</p>
                 </div>
 
                 <div
@@ -762,13 +1060,13 @@ export default function AdminPortalPage() {
                   className="cursor-pointer bg-[#111726] hover:bg-[#161E31] border border-slate-800/90 rounded-2xl p-5 border-t-2 border-t-red-500 transition"
                 >
                   <div className="flex justify-between items-center text-xs text-slate-400">
-                    <span>Cancelados (Vermelho)</span>
+                    <span>Cancelados no mês (Vermelho)</span>
                     <span className="text-red-400 font-bold">✕</span>
                   </div>
                   <p className="text-4xl font-extrabold text-red-400 mt-2">
-                    {String(countCancelled).padStart(2, "0")}
+                    {String(countMonthCancelled).padStart(2, "0")}
                   </p>
-                  <p className="text-xs text-red-400/80 mt-1">Ver histórico de cancelados →</p>
+                  <p className="text-xs text-red-400/80 mt-1">Total cancelados: {countCancelled} →</p>
                 </div>
               </div>
 
@@ -776,43 +1074,44 @@ export default function AdminPortalPage() {
                 <div className="xl:col-span-8 bg-[#111726] border border-slate-800/90 rounded-3xl p-6 space-y-4">
                   <div className="flex items-center justify-between">
                     <div>
-                      <h2 className="text-lg font-extrabold text-white">Agenda do mês ({currentYearMonth})</h2>
+                      <h2 className="text-lg font-extrabold text-white">
+                        Agenda de {formatYearMonthLabel(selectedYearMonth)}
+                      </h2>
                       <p className="text-xs text-slate-400">
-                        Clique num evento para editar dados ou aprovar/escalar equipe
+                        Veja o status de confirmação de cada membro da equipe interna e externa
                       </p>
                     </div>
                     <span className="text-xs bg-[#0A0E17] border border-slate-800 px-3 py-1 rounded-full text-amber-400 font-semibold">
-                      {eventsThisMonth.length} evento(s) no mês
+                      {eventsInSelectedMonth.length} evento(s) em {selectedYearMonth}
                     </span>
                   </div>
 
-                  {eventsThisMonth.length === 0 ? (
+                  {eventsInSelectedMonth.length === 0 ? (
                     <div className="bg-[#0A0E17] border border-slate-800/80 rounded-2xl p-8 text-center space-y-2">
                       <p className="text-sm font-semibold text-slate-300">
-                        Nenhum evento programado para este mês.
+                        Nenhum evento programado para {formatYearMonthLabel(selectedYearMonth)}.
                       </p>
                       <p className="text-xs text-slate-500">
-                        Use o botão &quot;+ Novo agendamento rápido&quot; no topo para agendar.
+                        Use o seletor de meses acima para navegar pelo ano ou clique em &quot;+ Novo agendamento rápido&quot;.
                       </p>
                     </div>
                   ) : (
                     <div className="space-y-3">
-                      {eventsThisMonth.map((ev) => (
+                      {eventsInSelectedMonth.map((ev) => (
                         <div
                           key={ev.id}
                           onClick={() => openEventModal(ev)}
                           className="cursor-pointer bg-[#0A0E17] hover:bg-[#131B2E] border border-slate-800/90 hover:border-amber-500/40 rounded-2xl p-4 flex flex-col sm:flex-row justify-between gap-4 transition"
                         >
-                          <div className="flex gap-4">
+                          <div className="flex gap-4 flex-1">
                             <div className="text-xs font-mono text-slate-300 border-r border-slate-800 pr-4 flex flex-col justify-center shrink-0">
                               <span className="text-[10px] text-amber-400 font-bold">{ev.eventDate}</span>
                               <span className="font-bold text-white">{ev.startTime}</span>
                               <span className="text-slate-500">{ev.endTime}</span>
                             </div>
-                            <div className="space-y-1.5">
+                            <div className="space-y-1.5 flex-1">
                               <div className="flex flex-wrap items-center gap-2">
                                 <h3 className="font-bold text-sm text-white">{ev.title}</h3>
-                                {/* CARD #32: Cores de status padronizadas */}
                                 <span
                                   className={`text-[10px] font-bold px-2.5 py-0.5 rounded-full ${getStatusBadgeClasses(
                                     ev.status
@@ -827,12 +1126,12 @@ export default function AdminPortalPage() {
                               </div>
                               <p className="text-xs text-slate-400">
                                 <span className="text-amber-400 font-semibold">{ev.eventType}</span> · Quantidade:{" "}
-                                <strong className="text-slate-200">{ev.honoreeName}</strong> · Cliente: {ev.clientName}
+                                <strong className="text-slate-200">{ev.honoreeName}</strong> · Cliente: {ev.clientName} ·
+                                ADM: <strong className="text-slate-300">{ev.responsibleAdmin}</strong>
                               </p>
-                              <p className="text-[11px] text-slate-400">
-                                ADM: <strong className="text-slate-300">{ev.responsibleAdmin}</strong> · Equipe:{" "}
-                                {ev.supportTeam.join(" / ")}
-                              </p>
+
+                              {/* EXIBIÇÃO DA CONFIRMAÇÃO DA EQUIPE INTERNA E EXTERNA */}
+                              {renderStaffConfirmationBadges(ev)}
                             </div>
                           </div>
 
@@ -872,7 +1171,7 @@ export default function AdminPortalPage() {
                 <div className="xl:col-span-4 space-y-4">
                   <div className="bg-[#111726] border border-slate-800/90 rounded-3xl p-5 space-y-3">
                     <div className="flex justify-between items-center">
-                      <h3 className="text-sm font-bold text-white">Solicitações Pendentes</h3>
+                      <h3 className="text-sm font-bold text-white">Solicitações Pendentes (Geral)</h3>
                       <span className="text-[11px] text-orange-400 font-semibold">
                         {pendingEvents.length} pendente(s)
                       </span>
@@ -910,37 +1209,38 @@ export default function AdminPortalPage() {
             </div>
           )}
 
-          {/* ABA 2: GESTÃO DE EVENTOS — AGENDA COBRINDO A ÁREA TODA (Cards #23, #24, #26, #27 e #30) */}
+          {/* ABA 2: GESTÃO DE EVENTOS — NAVEGAÇÃO POR TODOS OS MESES + CONFIRMAÇÃO DA EQUIPE */}
           {activeTab === "EVENTOS" && (
             <div className="w-full space-y-6">
-              {/* CALENDÁRIO MENSAL COBRINDO 100% DA LARGURA (Card #23) */}
+              {renderMonthNavigationBar()}
+
               <div className="w-full bg-[#111726] border border-slate-800/90 rounded-3xl p-6 space-y-4">
                 <div className="flex flex-wrap items-center justify-between gap-3">
                   <div>
                     <h3 className="text-lg font-extrabold text-white">
-                      Agenda Mensal Completa ({currentYearMonth})
+                      Calendário Mensal — {formatYearMonthLabel(selectedYearMonth)}
                     </h3>
                     <p className="text-xs text-slate-400">
-                      Clique em qualquer dia para filtrar os eventos ou clique em &quot;+ Novo agendamento rápido&quot; no topo
+                      Clique em qualquer dia para filtrar os eventos ou use o navegador acima para mudar de mês/ano
                     </p>
                   </div>
 
                   <div className="flex flex-wrap items-center gap-4 text-xs">
                     <span className="flex items-center gap-1.5 text-emerald-400 font-semibold">
-                      <span className="w-2.5 h-2.5 rounded-full bg-emerald-400" /> Confirmado ({countConfirmed})
+                      <span className="w-2.5 h-2.5 rounded-full bg-emerald-400" /> Confirmado ({countMonthConfirmed})
                     </span>
                     <span className="flex items-center gap-1.5 text-orange-400 font-semibold">
-                      <span className="w-2.5 h-2.5 rounded-full bg-orange-400" /> Pendente ({countPending})
+                      <span className="w-2.5 h-2.5 rounded-full bg-orange-400" /> Pendente ({countMonthPending})
                     </span>
                     <span className="flex items-center gap-1.5 text-red-400 font-semibold">
-                      <span className="w-2.5 h-2.5 rounded-full bg-red-500" /> Cancelado ({countCancelled})
+                      <span className="w-2.5 h-2.5 rounded-full bg-red-500" /> Cancelado ({countMonthCancelled})
                     </span>
                     {selectedCalendarDay && (
                       <button
                         onClick={() => setSelectedCalendarDay(null)}
                         className="text-amber-400 underline font-bold"
                       >
-                        Mostrar mês inteiro
+                        Mostrar todos os dias de {formatYearMonthLabel(selectedYearMonth)}
                       </button>
                     )}
                   </div>
@@ -962,7 +1262,7 @@ export default function AdminPortalPage() {
                   ))}
                   {Array.from({ length: daysInMonth }).map((_, idx) => {
                     const dayNum = idx + 1;
-                    const fullDate = `${currentYearMonth}-${String(dayNum).padStart(2, "0")}`;
+                    const fullDate = `${selectedYearMonth}-${String(dayNum).padStart(2, "0")}`;
                     const dayEvents = events.filter((e) => e.eventDate === fullDate);
                     const hasConfirmed = dayEvents.some((e) => e.status === "CONFIRMADO");
                     const hasPending = dayEvents.some((e) => e.status === "PENDENTE");
@@ -997,10 +1297,8 @@ export default function AdminPortalPage() {
                 </div>
               </div>
 
-              {/* LISTAGEM DE EVENTOS EM LARGURA TOTAL COM CONTAGEM POR STATUS (Card #27) E BOTÃO APROVAR (Card #26) */}
               <div className="w-full bg-[#111726] border border-slate-800/90 rounded-3xl p-6 space-y-5">
                 <div className="flex flex-wrap items-center justify-between gap-3">
-                  {/* CARD #27: Mostrar quantidade de eventos de acordo com o Status */}
                   <div className="flex flex-wrap gap-2 bg-[#0A0E17] p-1.5 rounded-2xl border border-slate-800">
                     <button
                       onClick={() => setStatusFilter("TODOS")}
@@ -1010,7 +1308,7 @@ export default function AdminPortalPage() {
                           : "text-slate-400 hover:text-white"
                       }`}
                     >
-                      Todos ({countAll})
+                      Todos no mês ({countMonthAll})
                     </button>
                     <button
                       onClick={() => setStatusFilter("PENDENTE")}
@@ -1020,7 +1318,7 @@ export default function AdminPortalPage() {
                           : "text-orange-400 hover:bg-orange-500/10"
                       }`}
                     >
-                      ● Pendentes ({countPending})
+                      ● Pendentes ({countMonthPending})
                     </button>
                     <button
                       onClick={() => setStatusFilter("CONFIRMADO")}
@@ -1030,7 +1328,7 @@ export default function AdminPortalPage() {
                           : "text-emerald-400 hover:bg-emerald-500/10"
                       }`}
                     >
-                      ✓ Confirmados ({countConfirmed})
+                      ✓ Confirmados ({countMonthConfirmed})
                     </button>
                     <button
                       onClick={() => setStatusFilter("CANCELADO")}
@@ -1040,7 +1338,7 @@ export default function AdminPortalPage() {
                           : "text-red-400 hover:bg-red-500/10"
                       }`}
                     >
-                      ✕ Cancelados ({countCancelled})
+                      ✕ Cancelados ({countMonthCancelled})
                     </button>
                   </div>
 
@@ -1048,14 +1346,14 @@ export default function AdminPortalPage() {
                     type="text"
                     value={searchQuery}
                     onChange={(e) => setSearchQuery(e.target.value)}
-                    placeholder="🔍 Procurar evento por título, data ou categoria..."
+                    placeholder="🔍 Procurar evento neste mês..."
                     className="bg-[#0A0E17] border border-slate-800 rounded-xl px-4 py-2.5 text-xs text-white w-full sm:w-80"
                   />
                 </div>
 
                 {filteredEvents.length === 0 ? (
                   <p className="text-xs text-slate-500 py-8 text-center">
-                    Nenhum evento encontrado para o filtro selecionado.
+                    Nenhum evento encontrado em {formatYearMonthLabel(selectedYearMonth)} para o filtro selecionado.
                   </p>
                 ) : (
                   <div className="space-y-3">
@@ -1064,13 +1362,12 @@ export default function AdminPortalPage() {
                         key={ev.id}
                         className="bg-[#0A0E17] border border-slate-800 rounded-2xl p-4 flex flex-col sm:flex-row justify-between gap-4"
                       >
-                        <div className="space-y-1.5">
+                        <div className="space-y-1.5 flex-1">
                           <div className="flex flex-wrap items-center gap-2">
                             <h3 className="font-bold text-sm text-white">{ev.title}</h3>
                             <span className="text-[10px] font-bold px-2.5 py-0.5 rounded bg-slate-800 text-amber-300">
                               {ev.eventType}
                             </span>
-                            {/* CARD #30: Cores Confirmado Verde, Cancelado Vermelho, Pendente Laranja */}
                             <span
                               className={`text-[10px] font-bold px-2.5 py-0.5 rounded-full ${getStatusBadgeClasses(
                                 ev.status
@@ -1085,15 +1382,14 @@ export default function AdminPortalPage() {
                           </div>
                           <p className="text-xs text-slate-300">
                             📅 <strong>{ev.eventDate}</strong> ({ev.startTime} - {ev.endTime}) · 👥 Quantidade:{" "}
-                            <strong>{ev.honoreeName}</strong> · Cliente: {ev.clientName}
+                            <strong>{ev.honoreeName}</strong> · Cliente: {ev.clientName} · ADM: {ev.responsibleAdmin}
                           </p>
-                          <p className="text-[11px] text-slate-500">
-                            ADM: {ev.responsibleAdmin} · Equipe: {ev.supportTeam.join(", ")}
-                          </p>
+
+                          {/* CONFIRMAÇÃO DA EQUIPE INTERNA E EXTERNA NA GESTÃO DE EVENTOS */}
+                          {renderStaffConfirmationBadges(ev)}
                         </div>
 
                         <div className="flex flex-wrap items-center gap-2 shrink-0">
-                          {/* CARD #26: Deve ser possível aprovar os eventos na área de gestão também */}
                           {ev.status === "PENDENTE" && (
                             <button
                               onClick={() => handleApproveAndSyncGcal(ev.id)}
@@ -1106,7 +1402,7 @@ export default function AdminPortalPage() {
                             onClick={() => openEventModal(ev)}
                             className="bg-[#192236] hover:bg-slate-800 text-amber-400 border border-amber-500/30 text-xs font-semibold px-3 py-2 rounded-xl"
                           >
-                            ✏️ Editar dados
+                            ✏️ Editar dados & Escala
                           </button>
                           <a
                             href={generateGoogleCalendarUrl(ev)}
@@ -1446,8 +1742,8 @@ export default function AdminPortalPage() {
             </div>
           )}
 
-          {/* ABA 4: BACKUP */}
-          {activeTab === "BACKUP" && (
+          {/* ABA 4: BACKUP (EXCLUSIVA PARA PERFIL ADM — BLOQUEADA PARA EQUIPE INTERNA) */}
+          {activeTab === "BACKUP" && canAccessBackup && (
             <div className="space-y-6">
               <div className="grid grid-cols-1 md:grid-cols-3 gap-5">
                 {[
@@ -1529,7 +1825,7 @@ export default function AdminPortalPage() {
         </main>
       </div>
 
-      {/* CARD #24: MODAL DE "NOVO AGENDAMENTO RÁPIDO" (Escondido por padrão, abre ao clicar no botão do topo) */}
+      {/* MODAL DE "NOVO AGENDAMENTO RÁPIDO" */}
       {showNewEventModal && (
         <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-sm flex items-center justify-center p-4">
           <form
@@ -1564,7 +1860,6 @@ export default function AdminPortalPage() {
               />
             </div>
 
-            {/* CARD #25: Quantidade de pessoas */}
             <div className="grid grid-cols-2 gap-3">
               <div>
                 <label className="block text-slate-300 mb-1">Categoria (Texto livre) *</label>
@@ -1604,7 +1899,7 @@ export default function AdminPortalPage() {
                 />
               </div>
               <div>
-                <label className="block text-slate-300 mb-1">Responsável ADM</label>
+                <label className="block text-slate-300 mb-1">Responsável ADM / Interno</label>
                 <input
                   type="text"
                   required
@@ -1658,7 +1953,9 @@ export default function AdminPortalPage() {
                     <label key={st.id} className="flex items-center justify-between cursor-pointer py-1">
                       <span>
                         <strong className="text-white">{st.name}</strong> ·{" "}
-                        <span className="text-slate-400">{st.specialty}</span>
+                        <span className="text-slate-400">
+                          {st.specialty} ({st.staffType === "INTERNA" ? "Interna" : "Externa"})
+                        </span>
                       </span>
                       <input
                         type="checkbox"
@@ -1806,7 +2103,7 @@ export default function AdminPortalPage() {
         </div>
       )}
 
-      {/* MODAL DE EDIÇÃO DE EVENTO / ESCALA */}
+      {/* MODAL DE EDIÇÃO DE EVENTO, ESCALA E CONFIRMAÇÃO DE PRESENÇA DA EQUIPE */}
       {editingEvent && (
         <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-sm flex items-center justify-center p-4">
           <form
@@ -1814,7 +2111,12 @@ export default function AdminPortalPage() {
             className="bg-[#111726] border border-slate-700 rounded-3xl max-w-lg w-full p-6 space-y-4 shadow-2xl text-xs"
           >
             <div className="flex items-center justify-between border-b border-slate-800 pb-3">
-              <h3 className="text-lg font-extrabold text-white">Editar Evento & Escala</h3>
+              <div>
+                <span className="text-[10px] font-bold uppercase text-amber-400">
+                  GESTÃO DE ESCALA E CONFIRMAÇÃO DE PRESENÇA
+                </span>
+                <h3 className="text-lg font-extrabold text-white mt-0.5">Editar Evento & Escala</h3>
+              </div>
               <button
                 type="button"
                 onClick={() => setEditingEvent(null)}
@@ -1896,30 +2198,81 @@ export default function AdminPortalPage() {
                   type="time"
                   required
                   value={modEnd}
-                  onChange={(e) => setEditEndOrModEnd(e.target.value)}
+                  onChange={(e) => setModEnd(e.target.value)}
                   className="w-full bg-[#0A0E17] border border-slate-800 rounded-xl px-2.5 py-2 text-white"
                 />
               </div>
             </div>
 
             <div>
-              <label className="block text-slate-300 font-bold mb-1.5">Escala de Profissionais:</label>
-              <div className="space-y-1.5 max-h-32 overflow-y-auto bg-[#0A0E17] border border-slate-800 p-3 rounded-xl">
-                {staffList.map((st) => (
-                  <label key={st.id} className="flex items-center justify-between cursor-pointer py-1">
-                    <span>
-                      <strong className="text-white">{st.name}</strong> ({st.specialty})
-                    </span>
-                    <input
-                      type="checkbox"
-                      checked={modTeam.includes(st.name)}
-                      onChange={(e) => {
-                        if (e.target.checked) setModTeam([...modTeam, st.name]);
-                        else setModTeam(modTeam.filter((n) => n !== st.name));
-                      }}
-                    />
-                  </label>
-                ))}
+              <label className="block text-slate-300 font-bold mb-1.5">
+                Escala e Confirmação da Equipe (Interna e Externa):
+              </label>
+              <div className="space-y-2 max-h-44 overflow-y-auto bg-[#0A0E17] border border-slate-800 p-3 rounded-xl">
+                {staffList.length === 0 ? (
+                  <p className="text-slate-500">Cadastre membros na aba Cadastros para escalá-los aqui.</p>
+                ) : (
+                  staffList.map((st) => {
+                    const isAssigned = modTeam.includes(st.name);
+                    const isConfirmed = isStaffMemberConfirmed(st.name, modConfirmedStaff);
+
+                    return (
+                      <div
+                        key={st.id}
+                        className="flex items-center justify-between gap-2 py-1.5 border-b border-slate-800/60 last:border-b-0"
+                      >
+                        <label className="flex items-center gap-2 cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={isAssigned}
+                            onChange={(e) => {
+                              if (e.target.checked) {
+                                setModTeam([...modTeam.filter((n) => n !== "A definir pelo ADM"), st.name]);
+                              } else {
+                                setModTeam(modTeam.filter((n) => n !== st.name));
+                                setModConfirmedStaff(
+                                  modConfirmedStaff.filter(
+                                    (c) => c.trim().toLowerCase() !== st.name.trim().toLowerCase()
+                                  )
+                                );
+                              }
+                            }}
+                          />
+                          <span>
+                            <strong className="text-white">{st.name}</strong>{" "}
+                            <span className="text-slate-400">
+                              ({st.specialty} · {st.staffType === "INTERNA" ? "Interna" : "Externa"})
+                            </span>
+                          </span>
+                        </label>
+
+                        {isAssigned && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              if (isConfirmed) {
+                                setModConfirmedStaff(
+                                  modConfirmedStaff.filter(
+                                    (c) => c.trim().toLowerCase() !== st.name.trim().toLowerCase()
+                                  )
+                                );
+                              } else {
+                                setModConfirmedStaff([...modConfirmedStaff, st.name]);
+                              }
+                            }}
+                            className={`px-2.5 py-1 rounded-lg text-[10px] font-bold border transition ${
+                              isConfirmed
+                                ? "bg-emerald-500/20 text-emerald-300 border-emerald-500/40"
+                                : "bg-orange-500/20 text-orange-300 border-orange-500/40"
+                            }`}
+                          >
+                            {isConfirmed ? "✓ Confirmado" : "⏳ Aguardando (Clicar p/ confirmar)"}
+                          </button>
+                        )}
+                      </div>
+                    );
+                  })
+                )}
               </div>
             </div>
 
@@ -1928,7 +2281,7 @@ export default function AdminPortalPage() {
                 type="submit"
                 className="flex-1 bg-[#F59E0B] hover:bg-amber-400 text-slate-950 font-bold py-3 rounded-xl"
               >
-                Guardar alterações
+                Guardar alterações e confirmações
               </button>
               <button
                 type="button"
@@ -1943,8 +2296,4 @@ export default function AdminPortalPage() {
       )}
     </div>
   );
-
-  function setEditEndOrModEnd(val: string) {
-    setModEnd(val);
-  }
 }
