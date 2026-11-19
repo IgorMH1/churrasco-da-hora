@@ -82,6 +82,7 @@ export default function AdminPortalPage() {
   const [todayGmt3, setTodayGmt3] = useState<string>("2026-11-18");
   const [selectedYearMonth, setSelectedYearMonth] = useState<string>("2026-11");
   const [currentUser, setCurrentUser] = useState<UserAccount>(DEFAULT_ADMIN_USER);
+  const [myPasswordDaysRemaining, setMyPasswordDaysRemaining] = useState<number>(90);
   const [feedback, setFeedback] = useState<{ type: "success" | "error"; text: string } | null>(null);
 
   const [users, setUsers] = useState<UserAccount[]>([]);
@@ -148,7 +149,7 @@ export default function AdminPortalPage() {
   const [editUserStatus, setEditUserStatus] = useState<"ATIVO" | "INATIVO">("ATIVO");
   const [editUserNewPassword, setEditUserNewPassword] = useState("");
 
-  // Estados da Nova Aba "MINHA_CONTA" (Autogestão do próprio usuário logado)
+  // Estados da Aba "MINHA_CONTA" (Autogestão do próprio usuário logado)
   const [myAccountName, setMyAccountName] = useState("");
   const [myAccountEmail, setMyAccountEmail] = useState("");
   const [myAccountPhone, setMyAccountPhone] = useState("");
@@ -179,11 +180,13 @@ export default function AdminPortalPage() {
       setMyAccountEmail(session.email);
       setMyAccountPhone(session.phoneAnatel);
       setMyAccountSpecialty(session.specialty || "");
+      setMyPasswordDaysRemaining(getPasswordDaysRemaining(session.passwordChangedAtIso));
     } else {
       setMyAccountName(DEFAULT_ADMIN_USER.name);
       setMyAccountEmail(DEFAULT_ADMIN_USER.email);
       setMyAccountPhone(DEFAULT_ADMIN_USER.phoneAnatel);
       setMyAccountSpecialty(DEFAULT_ADMIN_USER.specialty || "");
+      setMyPasswordDaysRemaining(getPasswordDaysRemaining(DEFAULT_ADMIN_USER.passwordChangedAtIso));
     }
 
     fetchAllFromSupabase().then((data) => {
@@ -204,6 +207,7 @@ export default function AdminPortalPage() {
           setMyAccountEmail(fresh.email);
           setMyAccountPhone(fresh.phoneAnatel);
           setMyAccountSpecialty(fresh.specialty || "");
+          setMyPasswordDaysRemaining(getPasswordDaysRemaining(fresh.passwordChangedAtIso));
         }
       }
     });
@@ -213,7 +217,6 @@ export default function AdminPortalPage() {
   const isAdmin = currentUser.role === "ADM";
   const isReadOnlyStaff = currentUser.role !== "ADM";
   const canAccessBackup = isAdmin;
-  const myPasswordDaysRemaining = getPasswordDaysRemaining(currentUser.passwordChangedAtIso);
 
   useEffect(() => {
     if (!canAccessBackup && activeTab === "BACKUP") {
@@ -274,7 +277,6 @@ export default function AdminPortalPage() {
   const myPhoneCheck = validateAnatelPhone(myAccountPhone);
   const myPwCheck = validatePasswordRbac(myNewPassword);
 
-  // Alternar confirmação de presença: ADM pode alternar qualquer pessoa; Equipe pode confirmar apenas a própria presença
   const handleToggleStaffPresenceOnEvent = (eventId: string, memberName: string) => {
     if (isReadOnlyStaff && memberName.trim().toLowerCase() !== currentUser.name.trim().toLowerCase()) {
       return;
@@ -344,7 +346,6 @@ export default function AdminPortalPage() {
     saveClientsToStorage(syncedClients);
   };
 
-  // AUTOGESTÃO NA ABA "MINHA CONTA" — Salvar Dados Pessoais do próprio usuário logado
   const handleSaveMyOwnProfile = (e: React.FormEvent) => {
     e.preventDefault();
     if (!myPhoneCheck.valid) {
@@ -384,7 +385,6 @@ export default function AdminPortalPage() {
     });
   };
 
-  // AUTOGESTÃO NA ABA "MINHA CONTA" — Alterar a própria senha RBAC
   const handleUpdateMyOwnPassword = (e: React.FormEvent) => {
     e.preventDefault();
     if (myCurrentPassword !== currentUser.password) {
@@ -418,6 +418,7 @@ export default function AdminPortalPage() {
     syncAllTablesFromUsers(updatedUsers);
     setCurrentUser(updatedMe);
     setCurrentUserSession(updatedMe);
+    setMyPasswordDaysRemaining(90);
     setMyCurrentPassword("");
     setMyNewPassword("");
     setMyConfirmPassword("");
@@ -837,7 +838,6 @@ export default function AdminPortalPage() {
   const daysInMonth = new Date(calYear || 2026, calMonth || 11, 0).getDate();
   const firstWeekday = new Date(calYear || 2026, (calMonth || 11) - 1, 1).getDay();
 
-  // Menu lateral com a nova aba "MINHA_CONTA" visível para todos os utilizadores autenticados
   const visibleMenuTabs = [
     { id: "DASHBOARD", label: "Dashboard (Mensal)", icon: "⊞" },
     { id: "EVENTOS", label: isReadOnlyStaff ? "Agenda de eventos (Visão)" : "Gestão de eventos", icon: "📅" },
@@ -904,7 +904,6 @@ export default function AdminPortalPage() {
     </div>
   );
 
-  // Renderiza os badges de confirmação: ADM pode alternar todos; Equipe tem modo visualização + botão de confirmar a própria presença
   const renderStaffConfirmationBadges = (ev: EventRecord) => {
     const validTeam = (ev.supportTeam || []).filter(
       (m) => m !== "A definir pelo ADM" && m !== "Sem equipe escalada"
@@ -1119,7 +1118,6 @@ export default function AdminPortalPage() {
             </p>
           </div>
 
-          {/* BOTÃO "+ NOVO AGENDAMENTO RÁPIDO" VISÍVEL APENAS PARA ADM */}
           {isAdmin && (activeTab === "DASHBOARD" || activeTab === "EVENTOS") && (
             <button
               type="button"
@@ -1137,7 +1135,6 @@ export default function AdminPortalPage() {
           )}
         </header>
 
-        {/* AVISO DE MODO SOMENTE VISUALIZAÇÃO PARA A EQUIPE */}
         {isReadOnlyStaff && activeTab !== "MINHA_CONTA" && (
           <div className="mx-6 mt-5 px-4 py-3 rounded-2xl bg-sky-950/40 border border-sky-500/30 text-sky-200 text-xs flex flex-wrap items-center justify-between gap-2">
             <span>
@@ -1316,7 +1313,6 @@ export default function AdminPortalPage() {
                             </div>
                           </div>
 
-                          {/* BOTÕES DE EDIÇÃO/APROVAÇÃO VISÍVEIS APENAS PARA ADM */}
                           <div
                             className="flex sm:flex-col justify-end gap-2 shrink-0"
                             onClick={(e) => e.stopPropagation()}
@@ -1410,7 +1406,7 @@ export default function AdminPortalPage() {
             </div>
           )}
 
-          {/* ABA 2: GESTÃO DE EVENTOS (MODO VISUALIZAÇÃO PARA EQUIPE / CONTROLE TOTAL PARA ADM) */}
+          {/* ABA 2: GESTÃO DE EVENTOS */}
           {activeTab === "EVENTOS" && (
             <div className="w-full space-y-6">
               {renderMonthNavigationBar()}
@@ -1631,7 +1627,7 @@ export default function AdminPortalPage() {
             </div>
           )}
 
-          {/* ABA 3: CADASTROS (FORMULÁRIO E EDIÇÃO OCULTOS PARA A EQUIPE EM MODO VISUALIZAÇÃO) */}
+          {/* ABA 3: CADASTROS */}
           {activeTab === "CADASTROS" && (
             <div className="space-y-6">
               {isAdmin && (
@@ -1952,7 +1948,7 @@ export default function AdminPortalPage() {
             </div>
           )}
 
-          {/* ABA 4: MINHA CONTA (AUTOGESTÃO DO PRÓPRIO PERFIL E SENHA RBAC NO SUPABASE) */}
+          {/* ABA 4: MINHA CONTA */}
           {activeTab === "MINHA_CONTA" && (
             <div className="grid grid-cols-1 xl:grid-cols-12 gap-6 items-start">
               <form
