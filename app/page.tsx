@@ -19,7 +19,32 @@ import {
   EventRecord,
 } from "../lib/services/storage";
 
-type ActiveTab = "LOGIN" | "ESQUECI_SENHA" | "AGENDE_EVENTO";
+type ActiveTab = "LOGIN" | "ESQUECI_SENHA" | "TROCAR_SENHA" | "AGENDE_EVENTO";
+
+// Gera um token com validade de 15 minutos vinculado ao e-mail
+function createResetToken(email: string): string {
+  const payload = {
+    e: email.trim().toLowerCase(),
+    exp: Date.now() + 15 * 60 * 1000, // 15 minutos
+  };
+  return btoa(JSON.stringify(payload));
+}
+
+// Valida se o token do link pertence ao e-mail e ainda está dentro dos 15 minutos
+function verifyResetToken(token: string, email: string): { valid: boolean; reason?: string } {
+  try {
+    const decoded = JSON.parse(atob(token)) as { e: string; exp: number };
+    if (!decoded || decoded.e !== email.trim().toLowerCase()) {
+      return { valid: false, reason: "O link de recuperação não corresponde a este e-mail." };
+    }
+    if (Date.now() > decoded.exp) {
+      return { valid: false, reason: "Este link expirou (limite de 15 minutos). Solicite um novo link." };
+    }
+    return { valid: true };
+  } catch {
+    return { valid: false, reason: "Link de recuperação inválido ou corrompido." };
+  }
+}
 
 export default function LoginAndPublicPortal() {
   const [activeTab, setActiveTab] = useState<ActiveTab>("LOGIN");
@@ -36,12 +61,18 @@ export default function LoginAndPublicPortal() {
   const [lockedUntil, setLockedUntil] = useState<number | null>(null);
   const [loginFeedback, setLoginFeedback] = useState<{ type: "error" | "success" | "warn"; text: string } | null>(null);
 
-  // Estados do "Esqueci minha senha"
+  // Estados do "Esqueci minha senha" (Disparo de e-mail real para o Gmail)
   const [recoveryEmail, setRecoveryEmail] = useState("");
-  const [generatedToken, setGeneratedToken] = useState<string | null>(null);
-  const [typedToken, setTypedToken] = useState("");
-  const [newRecoveryPassword, setNewRecoveryPassword] = useState("");
+  const [isSendingEmail, setIsSendingEmail] = useState(false);
   const [recoveryFeedback, setRecoveryFeedback] = useState<{ type: "error" | "success"; text: string } | null>(null);
+
+  // Estados da Aba Exclusiva "TROCAR_SENHA" (Aberta ao clicar no link do Gmail)
+  const [linkEmail, setLinkEmail] = useState("");
+  const [linkToken, setLinkToken] = useState("");
+  const [newResetPassword, setNewResetPassword] = useState("");
+  const [confirmResetPassword, setConfirmResetPassword] = useState("");
+  const [showResetPassword, setShowResetPassword] = useState(false);
+  const [resetTabFeedback, setResetTabFeedback] = useState<{ type: "error" | "success"; text: string } | null>(null);
 
   // Estados do "Agende seu evento"
   const [clientName, setClientName] = useState("");
@@ -59,6 +90,21 @@ export default function LoginAndPublicPortal() {
 
   useEffect(() => {
     setEventDate(getNowGmt3().dateStr);
+
+    // Verifica se o usuário abriu a página através do link enviado para o Gmail
+    if (typeof window !== "undefined") {
+      const params = new URLSearchParams(window.location.search);
+      const tabParam = params.get("tab");
+      const emailParam = params.get("email");
+      const tokenParam = params.get("token");
+
+      if (tabParam === "TROCAR_SENHA" && emailParam && tokenParam) {
+        setLinkEmail(emailParam.trim().toLowerCase());
+        setLinkToken(tokenParam);
+        setActiveTab("TROCAR_SENHA");
+      }
+    }
+
     fetchAllFromSupabase().then((cloudData) => {
       setAllUsers(cloudData.users);
       setAllEvents(cloudData.events);
@@ -67,7 +113,11 @@ export default function LoginAndPublicPortal() {
   }, []);
 
   const pwCheck = validatePasswordRbac(
-    activeTab === "LOGIN" ? password : activeTab === "ESQUECI_SENHA" ? newRecoveryPassword : clientPassword
+    activeTab === "LOGIN"
+      ? password
+      : activeTab === "TROCAR_SENHA"
+      ? newResetPassword
+      : clientPassword
   );
   const phoneCheck = validateAnatelPhone(clientPhone);
 
@@ -152,7 +202,6 @@ export default function LoginAndPublicPortal() {
     setLockedUntil(null);
     setCurrentUserSession(foundUser);
 
-    // REGRA RBAC: ADM e EQUIPE_INTERNA acessam /admin (Equipe Interna tem acesso a tudo, exceto Backup)
     const targetRoute =
       foundUser.role === "ADM" || foundUser.role === "EQUIPE_INTERNA"
         ? "/admin"
@@ -170,59 +219,138 @@ export default function LoginAndPublicPortal() {
     }, 600);
   };
 
+  // ENVIO REAL DE E-MAIL PARA O GMAIL COM O LINK DA ABA DE TROCA DE SENHA
   const handleSendRecoveryEmail = async (e: React.FormEvent) => {
     e.preventDefault();
     setRecoveryFeedback(null);
+    setIsSendingEmail(true);
 
-    const cloudData = await fetchAllFromSupabase();
-    const foundUser = cloudData.users.find((u) => u.email.toLowerCase() === recoveryEmail.trim().toLowerCase());
-    if (!foundUser) {
+    try {
+      const cloudData = await fetchAllFromSupabase();
+      const targetEmail = recoveryEmail.trim().toLowerCase();
+      const foundUser = cloudData.users.find((u) => u.email.toLowerCase() === targetEmail);
+
+      if (!foundUser) {
+        setRecoveryFeedback({
+          type: "error",
+          text: "Não encontramos nenhuma conta cadastrada no Supabase com este e-mail.",
+        });
+        setIsSendingEmail(false);
+        return;
+      }
+
+      const token = createResetToken(foundUser.email);
+      const origin = typeof window !== "undefined" ? window.location.origin : "http://localhost:3000";
+      const resetUrl = `${origin}/?tab=TROCAR_SENHA&email=${encodeURIComponent(
+        foundUser.email
+      )}&token=${encodeURIComponent(token)}`;
+
+      const response = await fetch("/api/recover-password", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          email: foundUser.email,
+          userName: foundUser.name,
+          resetUrl,
+        }),
+      });
+
+      const result = await response.json();
+
+      if (!response.ok) {
+        setRecoveryFeedback({
+          type: "error",
+          text: result.error || "Não foi possível enviar o e-mail pelo Gmail. Verifique o .env.local.",
+        });
+        setIsSendingEmail(false);
+        return;
+      }
+
+      setRecoveryFeedback({
+        type: "success",
+        text: `✓ E-mail real enviado com sucesso para ${foundUser.email}! Abra sua caixa de entrada do Gmail e clique no botão para acessar a aba de troca de senha.`,
+      });
+    } catch {
       setRecoveryFeedback({
         type: "error",
-        text: "Não encontramos nenhuma conta no Supabase com este e-mail.",
+        text: "Erro de conexão ao tentar disparar o e-mail de recuperação.",
+      });
+    } finally {
+      setIsSendingEmail(false);
+    }
+  };
+
+  // SALVAR A NOVA SENHA NA ABA EXCLUSIVA ABERTA PELO LINK DO GMAIL
+  const handleConfirmPasswordFromLink = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setResetTabFeedback(null);
+
+    const tokenCheck = verifyResetToken(linkToken, linkEmail);
+    if (!tokenCheck.valid) {
+      setResetTabFeedback({
+        type: "error",
+        text: tokenCheck.reason || "Link expirado ou inválido.",
       });
       return;
     }
 
-    const token = String(Math.floor(100000 + Math.random() * 900000));
-    setGeneratedToken(token);
-    setRecoveryFeedback({
-      type: "success",
-      text: `Código gerado para ${foundUser.email} (válido por 15 min): ${token}`,
-    });
-  };
-
-  const handleConfirmPasswordReset = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!generatedToken || typedToken.trim() !== generatedToken) {
-      setRecoveryFeedback({ type: "error", text: "Código de verificação inválido." });
+    if (!pwCheck.isValid) {
+      setResetTabFeedback({
+        type: "error",
+        text: "A nova senha deve cumprir todos os requisitos RBAC (mínimo de 8 caracteres, caractere especial, maiúscula, minúscula e número).",
+      });
       return;
     }
-    if (!pwCheck.isValid) {
-      setRecoveryFeedback({
+
+    if (newResetPassword !== confirmResetPassword) {
+      setResetTabFeedback({
         type: "error",
-        text: "A nova senha deve ter no mínimo 8 caracteres e incluir caractere especial.",
+        text: "A confirmação da senha não coincide com a nova senha digitada.",
+      });
+      return;
+    }
+
+    const cloudData = await fetchAllFromSupabase();
+    const foundUser = cloudData.users.find((u) => u.email.toLowerCase() === linkEmail.trim().toLowerCase());
+
+    if (!foundUser) {
+      setResetTabFeedback({
+        type: "error",
+        text: "Conta não localizada no Supabase para este e-mail.",
       });
       return;
     }
 
     const nowIso = new Date().toISOString();
-    const cloudData = await fetchAllFromSupabase();
     const updatedUsers = cloudData.users.map((u) =>
-      u.email.toLowerCase() === recoveryEmail.trim().toLowerCase()
-        ? { ...u, password: newRecoveryPassword, passwordChangedAtIso: nowIso }
+      u.email.toLowerCase() === linkEmail.trim().toLowerCase()
+        ? { ...u, password: newResetPassword, passwordChangedAtIso: nowIso }
         : u
     );
 
     setAllUsers(updatedUsers);
     saveUsersToStorage(updatedUsers);
-    setGeneratedToken(null);
-    setTypedToken("");
-    setNewRecoveryPassword("");
-    setRecoveryFeedback({
+
+    // Limpa os parâmetros da URL para invalidar o uso repetido na barra de endereços
+    if (typeof window !== "undefined") {
+      window.history.replaceState({}, document.title, "/");
+    }
+
+    setEmail(linkEmail);
+    setNewResetPassword("");
+    setConfirmResetPassword("");
+    setResetTabFeedback({
       type: "success",
-      text: "✓ Senha atualizada no Supabase! Você já pode entrar na aba Login.",
+      text: "✓ Senha alterada e salva no Supabase! Redirecionando para o Login...",
     });
+
+    setTimeout(() => {
+      setActiveTab("LOGIN");
+      setLoginFeedback({
+        type: "success",
+        text: "✓ Sua senha foi redefinida com sucesso! Entre com a nova senha abaixo.",
+      });
+    }, 1200);
   };
 
   const handlePreSchedule = async (e: React.FormEvent) => {
@@ -333,7 +461,7 @@ export default function LoginAndPublicPortal() {
 
           <div className="flex items-center gap-2 text-[11px] font-semibold tracking-[0.16em] text-slate-400 uppercase">
             <span className="w-2 h-2 rounded-full bg-emerald-400" />
-            <span>{isLoadingCloud ? "CONECTANDO SUPABASE..." : "SUPABASE CLOUD CONECTADO"}</span>
+            <span>{isLoadingCloud ? "CONECTANDO SUPABASE..." : "SUPABASE & GMAIL CONECTADOS"}</span>
           </div>
         </div>
       </header>
@@ -344,6 +472,8 @@ export default function LoginAndPublicPortal() {
             <span className="w-1.5 h-1.5 rounded-full bg-amber-400" />
             {activeTab === "AGENDE_EVENTO"
               ? "SEU PRÓXIMO BOM MOMENTO COMEÇA AQUI"
+              : activeTab === "TROCAR_SENHA"
+              ? "REDEFINIÇÃO SEGURA DE SENHA VIA LINK DO GMAIL"
               : "BONS MOMENTOS, BEM ORGANIZADOS"}
           </div>
 
@@ -352,7 +482,7 @@ export default function LoginAndPublicPortal() {
               Os melhores <span className="text-amber-500">encontros</span> começam aqui.
             </h1>
             <p className="text-base sm:text-lg text-slate-400 max-w-xl leading-relaxed">
-              Acesso em nuvem via Supabase para Administradores, Equipe Interna, Equipe Externa e Clientes.
+              Acesso em nuvem via Supabase com recuperação real por e-mail para Administradores, Equipe Interna, Equipe Externa e Clientes.
             </p>
           </div>
 
@@ -363,7 +493,7 @@ export default function LoginAndPublicPortal() {
             </div>
             <div className="bg-[#111726] border border-slate-800 p-3 rounded-xl">
               <span className="text-purple-400 font-bold block">Eq. Interna</span>
-              <span className="text-slate-400 text-[11px]">Gestão completa</span>
+              <span className="text-slate-400 text-[11px]">Visão do espaço</span>
             </div>
             <div className="bg-[#111726] border border-slate-800 p-3 rounded-xl">
               <span className="text-emerald-400 font-bold block">Eq. Externa</span>
@@ -408,16 +538,17 @@ export default function LoginAndPublicPortal() {
                   type="button"
                   onClick={() => setActiveTab("ESQUECI_SENHA")}
                   className={`py-2 px-3.5 rounded-xl text-xs sm:text-sm transition-all ${
-                    activeTab === "ESQUECI_SENHA"
+                    activeTab === "ESQUECI_SENHA" || activeTab === "TROCAR_SENHA"
                       ? "bg-[#F59E0B] text-slate-950 font-extrabold shadow-md"
                       : "text-slate-400 hover:text-white font-semibold"
                   }`}
                 >
-                  Esqueci minha senha
+                  {activeTab === "TROCAR_SENHA" ? "Nova senha" : "Esqueci minha senha"}
                 </button>
               </div>
             </div>
 
+            {/* ABA 1: LOGIN */}
             {activeTab === "LOGIN" && (
               <form onSubmit={handleLogin} className="space-y-5">
                 <div>
@@ -503,71 +634,145 @@ export default function LoginAndPublicPortal() {
               </form>
             )}
 
+            {/* ABA 2: ESQUECI MINHA SENHA (DISPARO REAL PARA O GMAIL) */}
             {activeTab === "ESQUECI_SENHA" && (
               <div className="space-y-5">
-                <h2 className="text-2xl font-extrabold text-white">Recuperar acesso</h2>
+                <div>
+                  <h2 className="text-2xl font-extrabold text-white">Recuperar acesso via Gmail</h2>
+                  <p className="text-xs sm:text-sm text-slate-400 mt-1">
+                    Digite seu e-mail cadastrado. Enviaremos uma mensagem real com o link direto para a aba de troca de senha.
+                  </p>
+                </div>
+
                 <form onSubmit={handleSendRecoveryEmail} className="space-y-4">
                   <div>
-                    <label className="block text-xs font-semibold text-slate-300 mb-2">E-mail cadastrado</label>
+                    <label className="block text-xs font-semibold text-slate-300 mb-2">
+                      E-mail cadastrado na sua conta
+                    </label>
                     <input
                       type="email"
                       required
                       value={recoveryEmail}
                       onChange={(e) => setRecoveryEmail(e.target.value)}
-                      placeholder="seuemail@exemplo.com"
+                      placeholder="seuemail@gmail.com"
                       className="w-full bg-[#0A0E17] border border-slate-800 rounded-xl px-4 py-3.5 text-sm text-white outline-none"
                     />
                   </div>
                   <button
                     type="submit"
-                    className="w-full bg-[#F59E0B] hover:bg-amber-400 text-slate-950 font-bold py-4 px-6 rounded-2xl transition text-sm"
+                    disabled={isSendingEmail}
+                    className="w-full bg-[#F59E0B] hover:bg-amber-400 disabled:opacity-50 text-slate-950 font-extrabold py-4 px-6 rounded-2xl transition text-sm"
                   >
-                    Enviar código de recuperação →
+                    {isSendingEmail ? "Enviando e-mail para o Gmail..." : "Enviar link de recuperação por e-mail →"}
                   </button>
                 </form>
 
                 {recoveryFeedback && (
-                  <div className="p-4 rounded-2xl text-xs border bg-emerald-950/50 border-emerald-500/30 text-emerald-300">
+                  <div
+                    className={`p-4 rounded-2xl text-xs border leading-relaxed ${
+                      recoveryFeedback.type === "success"
+                        ? "bg-emerald-950/50 border-emerald-500/30 text-emerald-300"
+                        : "bg-red-950/50 border-red-500/30 text-red-300"
+                    }`}
+                  >
                     {recoveryFeedback.text}
                   </div>
-                )}
-
-                {generatedToken && (
-                  <form
-                    onSubmit={handleConfirmPasswordReset}
-                    className="bg-[#0A0E17] border border-slate-800 rounded-2xl p-4 space-y-3"
-                  >
-                    <div>
-                      <label className="block text-xs text-slate-300 mb-1">Código de 6 dígitos</label>
-                      <input
-                        type="text"
-                        required
-                        value={typedToken}
-                        onChange={(e) => setTypedToken(e.target.value)}
-                        className="w-full bg-[#111726] border border-slate-700 rounded-xl px-3.5 py-2.5 text-xs font-mono text-white"
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-xs text-slate-300 mb-1">Nova senha (mín. 8 + especial)</label>
-                      <input
-                        type="password"
-                        required
-                        value={newRecoveryPassword}
-                        onChange={(e) => setNewRecoveryPassword(e.target.value)}
-                        className="w-full bg-[#111726] border border-slate-700 rounded-xl px-3.5 py-2.5 text-xs text-white"
-                      />
-                    </div>
-                    <button
-                      type="submit"
-                      className="w-full bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold py-2.5 rounded-xl text-xs transition"
-                    >
-                      Salvar nova senha no Supabase
-                    </button>
-                  </form>
                 )}
               </div>
             )}
 
+            {/* ABA 3: TROCAR SENHA (ABERTA PELO LINK ENVIADO AO GMAIL) */}
+            {activeTab === "TROCAR_SENHA" && (
+              <form onSubmit={handleConfirmPasswordFromLink} className="space-y-5">
+                <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+                  <div>
+                    <span className="text-[10px] font-bold uppercase tracking-wider text-amber-400">
+                      LINK DE RECUPERAÇÃO VERIFICADO
+                    </span>
+                    <h2 className="text-2xl font-extrabold text-white mt-0.5">Criar Nova Senha</h2>
+                  </div>
+                  <span className="text-xs font-mono bg-[#0A0E17] border border-slate-800 px-3 py-1.5 rounded-xl text-emerald-400">
+                    {linkEmail || "E-mail"}
+                  </span>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-semibold text-slate-300 mb-2">
+                    Nova senha RBAC *
+                  </label>
+                  <div className="relative">
+                    <input
+                      type={showResetPassword ? "text" : "password"}
+                      required
+                      value={newResetPassword}
+                      onChange={(e) => setNewResetPassword(e.target.value)}
+                      placeholder="Digite sua nova senha"
+                      className="w-full bg-[#0A0E17] border border-slate-800 focus:border-amber-500/70 rounded-xl px-4 py-3.5 text-sm text-white outline-none"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowResetPassword(!showResetPassword)}
+                      className="absolute right-4 top-1/2 -translate-y-1/2 text-slate-400 hover:text-white text-xs"
+                    >
+                      {showResetPassword ? "🙈" : "👁️"}
+                    </button>
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-semibold text-slate-300 mb-2">
+                    Confirme a nova senha *
+                  </label>
+                  <input
+                    type={showResetPassword ? "text" : "password"}
+                    required
+                    value={confirmResetPassword}
+                    onChange={(e) => setConfirmResetPassword(e.target.value)}
+                    placeholder="Repita sua nova senha"
+                    className="w-full bg-[#0A0E17] border border-slate-800 focus:border-amber-500/70 rounded-xl px-4 py-3.5 text-sm text-white outline-none"
+                  />
+                </div>
+
+                <div className="bg-[#0A0E17] border border-slate-800/90 rounded-2xl p-4 space-y-2.5">
+                  <p className="text-xs font-bold text-slate-200">Requisitos obrigatórios RBAC:</p>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs">
+                    <div className={pwCheck.minLength ? "text-emerald-400 font-bold" : "text-slate-500"}>
+                      ✓ Mínimo de 8 caracteres
+                    </div>
+                    <div className={pwCheck.hasSpecial ? "text-emerald-400 font-bold" : "text-slate-500"}>
+                      ✓ Caractere especial (!@#$%)
+                    </div>
+                    <div className={pwCheck.hasUpper && pwCheck.hasLower ? "text-emerald-400 font-bold" : "text-slate-500"}>
+                      ✓ Letra maiúscula e minúscula
+                    </div>
+                    <div className={pwCheck.hasNumber ? "text-emerald-400 font-bold" : "text-slate-500"}>
+                      ✓ Pelo menos 1 número
+                    </div>
+                  </div>
+                </div>
+
+                {resetTabFeedback && (
+                  <div
+                    className={`p-3.5 rounded-xl text-xs font-medium border ${
+                      resetTabFeedback.type === "success"
+                        ? "bg-emerald-950/60 border-emerald-500 text-emerald-200"
+                        : "bg-red-950/60 border-red-500 text-red-200"
+                    }`}
+                  >
+                    {resetTabFeedback.text}
+                  </div>
+                )}
+
+                <button
+                  type="submit"
+                  className="w-full bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-extrabold py-4 px-6 rounded-2xl transition text-sm shadow-lg shadow-emerald-500/10"
+                >
+                  ✓ Salvar nova senha no Supabase e ir para o Login
+                </button>
+              </form>
+            )}
+
+            {/* ABA 4: AGENDE SEU EVENTO */}
             {activeTab === "AGENDE_EVENTO" && (
               <form onSubmit={handlePreSchedule} className="space-y-5">
                 <h2 className="text-2xl font-extrabold text-white">Vamos planejar seu evento</h2>
