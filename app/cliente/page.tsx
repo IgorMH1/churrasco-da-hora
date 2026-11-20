@@ -23,6 +23,9 @@ import {
 } from "../../lib/services/storage";
 
 export default function ClientPortalPage() {
+  // CARD #49: Guarda de autenticação por perfil antes de renderizar a página
+  const [isAuthVerified, setIsAuthVerified] = useState<boolean>(false);
+
   const [activeTab, setActiveTab] = useState<"MEUS_EVENTOS" | "MINHA_CONTA">("MEUS_EVENTOS");
   const [feedback, setFeedback] = useState<{ type: "success" | "error"; text: string } | null>(null);
   const [daysRemaining, setDaysRemaining] = useState<number>(90);
@@ -51,11 +54,10 @@ export default function ClientPortalPage() {
   const [startTime, setStartTime] = useState("12:00");
   const [endTime, setEndTime] = useState("17:00");
 
-  // Campos da aba "Minha conta"
+  // Campos da aba "Minha conta" (CARD #40: Sem CPF/CNPJ)
   const [myName, setMyName] = useState("");
   const [myEmail, setMyEmail] = useState("");
   const [myPhone, setMyPhone] = useState("");
-  const [myCpfCnpj, setMyCpfCnpj] = useState("");
   const [currentPassword, setCurrentPassword] = useState("");
   const [newPassword, setNewPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
@@ -65,8 +67,18 @@ export default function ClientPortalPage() {
     setEventDate(now.dateStr);
 
     const sessionUser = getCurrentUserSession();
+
+    // CARD #49: Bloqueia acesso direto via URL sem login
     if (!sessionUser) {
-      window.location.href = "/";
+      window.location.replace("/");
+      return;
+    }
+
+    // CARD #49: Restrição estrita por perfil RBAC
+    if (sessionUser.role !== "CLIENTE" && sessionUser.role !== "ADM") {
+      const redirectTarget =
+        sessionUser.role === "EQUIPE_INTERNA" ? "/admin" : "/equipe";
+      window.location.replace(redirectTarget);
       return;
     }
 
@@ -74,8 +86,8 @@ export default function ClientPortalPage() {
     setMyName(sessionUser.name);
     setMyEmail(sessionUser.email);
     setMyPhone(sessionUser.phoneAnatel);
-    setMyCpfCnpj(sessionUser.cpfCnpj || "");
     setDaysRemaining(getPasswordDaysRemaining(sessionUser.passwordChangedAtIso));
+    setIsAuthVerified(true);
 
     fetchAllFromSupabase().then((cloudData) => {
       setAllUsers(cloudData.users);
@@ -86,12 +98,16 @@ export default function ClientPortalPage() {
         (u) => u.id === sessionUser.id || u.email.toLowerCase() === sessionUser.email.toLowerCase()
       );
       if (freshUser) {
+        if (freshUser.status === "INATIVO") {
+          setCurrentUserSession(null);
+          window.location.replace("/");
+          return;
+        }
         setCurrentUser(freshUser);
         setCurrentUserSession(freshUser);
         setMyName(freshUser.name);
         setMyEmail(freshUser.email);
         setMyPhone(freshUser.phoneAnatel);
-        setMyCpfCnpj(freshUser.cpfCnpj || "");
         setDaysRemaining(getPasswordDaysRemaining(freshUser.passwordChangedAtIso));
       }
       setIsLoadingCloud(false);
@@ -250,6 +266,7 @@ export default function ClientPortalPage() {
     setFeedback({ type: "success", text: "Solicitação de evento cancelada no Supabase." });
   };
 
+  // CARD #40: Salva o perfil do cliente sem CPF/CNPJ
   const handleSaveProfile = (e: React.FormEvent) => {
     e.preventDefault();
     if (!currentUser) return;
@@ -264,7 +281,6 @@ export default function ClientPortalPage() {
       name: myName.trim(),
       email: myEmail.trim().toLowerCase(),
       phoneAnatel: formattedPhone,
-      cpfCnpj: myCpfCnpj,
     };
 
     const existsInList = allUsers.some((u) => u.id === currentUser.id);
@@ -282,7 +298,6 @@ export default function ClientPortalPage() {
             name: myName.trim(),
             email: myEmail.trim().toLowerCase(),
             phoneAnatel: formattedPhone,
-            cpfCnpj: myCpfCnpj,
           }
         : c
     );
@@ -344,8 +359,24 @@ export default function ClientPortalPage() {
     });
   };
 
+  // CARD #49: Enquanto valida a sessão RBAC, não exibe conteúdo restrito
+  if (!isAuthVerified) {
+    return (
+      <div className="min-h-screen bg-[#0A0E17] text-slate-100 flex items-center justify-center p-6 font-sans">
+        <div className="bg-[#111726] border border-slate-800 rounded-3xl p-8 max-w-sm w-full text-center space-y-3 shadow-2xl">
+          <div className="w-10 h-10 mx-auto rounded-xl bg-amber-500/15 border border-amber-500/40 flex items-center justify-center text-amber-400 font-bold">
+            🔒
+          </div>
+          <p className="text-sm font-extrabold text-white">Verificando credenciais RBAC...</p>
+          <p className="text-xs text-slate-400">Validando sessão autenticada para acessar a Área do Cliente.</p>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="min-h-screen bg-[#0A0E17] text-slate-100 flex flex-col lg:flex-row font-sans">
+      {/* CONTAINER 1: SIDEBAR DE NAVEGAÇÃO */}
       <aside className="w-full lg:w-64 bg-[#0D121E] border-b lg:border-b-0 lg:border-r border-slate-800/80 flex flex-col justify-between p-5 shrink-0">
         <div className="space-y-7">
           <div className="flex items-center gap-3 px-1">
@@ -412,7 +443,7 @@ export default function ClientPortalPage() {
                 type="button"
                 onClick={() => {
                   setCurrentUserSession(null);
-                  window.location.href = "/";
+                  window.location.replace("/");
                 }}
                 className="text-slate-400 hover:text-red-400 transition"
               >
@@ -428,386 +459,388 @@ export default function ClientPortalPage() {
         </div>
       </aside>
 
+      {/* CONTAINER 2: ÁREA PRINCIPAL DO CLIENTE */}
       <div className="flex-1 flex flex-col min-w-0">
-        <header className="border-b border-slate-800/80 px-6 py-5 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-          <div>
-            <p className="text-[10px] font-bold tracking-[0.18em] text-amber-500 uppercase">
-              {activeTab === "MEUS_EVENTOS" ? "ÁREA DO CLIENTE · SUPABASE" : `CLIENTE · ${myName.toUpperCase()}`}
-            </p>
-            <h1 className="text-2xl sm:text-3xl font-extrabold text-white mt-0.5">
-              {activeTab === "MEUS_EVENTOS" ? `Olá, ${myName.split(" ")[0] || "Cliente"}!` : "Minha conta"}
-            </h1>
-            <p className="text-xs text-slate-400 mt-0.5">
-              {activeTab === "MEUS_EVENTOS"
-                ? "Legenda de status: Confirmado (Verde) · Pendente (Laranja) · Cancelado (Vermelho)"
-                : "Seus dados atualizados e sincronizados no Supabase."}
-            </p>
-          </div>
+        <header className="border-b border-slate-800/80 bg-[#0D121E]/60 px-6 py-5">
+          <div className="max-w-7xl mx-auto flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+            <div>
+              <p className="text-[10px] font-bold tracking-[0.18em] text-amber-500 uppercase">
+                {activeTab === "MEUS_EVENTOS" ? "ÁREA DO CLIENTE · SUPABASE" : `CLIENTE · ${myName.toUpperCase()}`}
+              </p>
+              <h1 className="text-2xl sm:text-3xl font-extrabold text-white mt-0.5">
+                {activeTab === "MEUS_EVENTOS" ? `Olá, ${myName.split(" ")[0] || "Cliente"}!` : "Minha conta"}
+              </h1>
+              <p className="text-xs text-slate-400 mt-0.5">
+                {activeTab === "MEUS_EVENTOS"
+                  ? "Legenda de status: Confirmado (Verde) · Pendente (Laranja) · Cancelado (Vermelho)"
+                  : "Seus dados pessoais e segurança RBAC sincronizados no Supabase."}
+              </p>
+            </div>
 
-          <div className="flex flex-wrap items-center gap-2.5">
-            <div className="px-3.5 py-2 rounded-full bg-emerald-950/50 border border-emerald-500/30 text-emerald-400 text-xs font-semibold">
-              ✓ Senha válida por mais {daysRemaining} dias
+            <div className="flex flex-wrap items-center gap-2.5">
+              <div className="px-3.5 py-2 rounded-full bg-emerald-950/50 border border-emerald-500/30 text-emerald-400 text-xs font-semibold">
+                ✓ Senha válida por mais {daysRemaining} dias
+              </div>
             </div>
           </div>
         </header>
 
-        {feedback && (
-          <div
-            className={`mx-6 mt-5 p-3.5 rounded-xl text-xs flex justify-between items-center border ${
-              feedback.type === "success"
-                ? "bg-emerald-950/60 border-emerald-500/40 text-emerald-200"
-                : "bg-red-950/60 border-red-500/40 text-red-200"
-            }`}
-          >
-            <span>{feedback.text}</span>
-            <button onClick={() => setFeedback(null)} className="font-bold ml-4">
-              ✕
-            </button>
-          </div>
-        )}
+        <main className="p-6 flex-1">
+          <div className="max-w-7xl mx-auto space-y-6">
+            {feedback && (
+              <div
+                className={`p-3.5 rounded-xl text-xs flex justify-between items-center border ${
+                  feedback.type === "success"
+                    ? "bg-emerald-950/60 border-emerald-500/40 text-emerald-200"
+                    : "bg-red-950/60 border-red-500/40 text-red-200"
+                }`}
+              >
+                <span>{feedback.text}</span>
+                <button onClick={() => setFeedback(null)} className="font-bold ml-4">
+                  ✕
+                </button>
+              </div>
+            )}
 
-        <main className="p-6 space-y-6 flex-1">
-          {activeTab === "MEUS_EVENTOS" && (
-            <div className="space-y-6">
-              {nextEvent && (
-                <div
-                  onClick={() => handleOpenEventModal(nextEvent)}
-                  className="cursor-pointer bg-gradient-to-r from-[#161F33] to-[#111726] hover:from-[#1B263E] border border-amber-500/30 hover:border-amber-500/60 rounded-3xl p-6 flex flex-col md:flex-row items-start md:items-center justify-between gap-6 transition shadow-lg"
-                >
-                  <div className="flex items-center gap-5">
-                    <div className="w-20 h-20 rounded-2xl bg-[#0A0E17] border border-amber-500/30 flex flex-col items-center justify-center text-center shrink-0">
-                      <span className="text-[10px] font-bold uppercase text-amber-400">PRÓXIMO</span>
-                      <span className="text-2xl font-extrabold text-white">
-                        {nextEvent.eventDate.split("-")[2] || "28"}
-                      </span>
+            {activeTab === "MEUS_EVENTOS" && (
+              <div className="space-y-6">
+                {/* CONTAINER 3: DESTAQUE DO PRÓXIMO EVENTO */}
+                {nextEvent && (
+                  <section
+                    onClick={() => handleOpenEventModal(nextEvent)}
+                    className="cursor-pointer bg-gradient-to-r from-[#161F33] to-[#111726] hover:from-[#1B263E] border border-amber-500/30 hover:border-amber-500/60 rounded-3xl p-6 flex flex-col md:flex-row items-start md:items-center justify-between gap-6 transition shadow-lg"
+                  >
+                    <div className="flex items-center gap-5">
+                      <div className="w-20 h-20 rounded-2xl bg-[#0A0E17] border border-amber-500/30 flex flex-col items-center justify-center text-center shrink-0">
+                        <span className="text-[10px] font-bold uppercase text-amber-400">PRÓXIMO</span>
+                        <span className="text-2xl font-extrabold text-white">
+                          {nextEvent.eventDate.split("-")[2] || "28"}
+                        </span>
+                      </div>
+                      <div className="space-y-1">
+                        <span
+                          className={`inline-block text-[10px] font-bold px-2.5 py-0.5 rounded-full ${getStatusBadgeClasses(
+                            nextEvent.status
+                          )}`}
+                        >
+                          {nextEvent.status === "CONFIRMADO"
+                            ? "● Confirmado (Verde)"
+                            : nextEvent.status === "CANCELADO"
+                            ? "● Cancelado (Vermelho)"
+                            : "● Pendente (Laranja)"}
+                        </span>
+                        <h2 className="text-xl font-extrabold text-white">{nextEvent.title}</h2>
+                        <p className="text-xs text-slate-300">
+                          👥 <strong>{nextEvent.honoreeName}</strong> · {nextEvent.eventDate} das {nextEvent.startTime}{" "}
+                          às {nextEvent.endTime} (GMT-3)
+                        </p>
+                      </div>
                     </div>
-                    <div className="space-y-1">
-                      <span
-                        className={`inline-block text-[10px] font-bold px-2.5 py-0.5 rounded-full ${getStatusBadgeClasses(
-                          nextEvent.status
-                        )}`}
-                      >
-                        {nextEvent.status === "CONFIRMADO"
-                          ? "● Confirmado (Verde)"
-                          : nextEvent.status === "CANCELADO"
-                          ? "● Cancelado (Vermelho)"
-                          : "● Pendente (Laranja)"}
-                      </span>
-                      <h2 className="text-xl font-extrabold text-white">{nextEvent.title}</h2>
-                      <p className="text-xs text-slate-300">
-                        👥 <strong>{nextEvent.honoreeName}</strong> · {nextEvent.eventDate} das {nextEvent.startTime}{" "}
-                        às {nextEvent.endTime} (GMT-3)
-                      </p>
+                    <span className="text-xs font-bold text-amber-400 bg-[#0A0E17] border border-amber-500/30 px-4 py-2.5 rounded-xl shrink-0">
+                      Ver detalhes / Editar →
+                    </span>
+                  </section>
+                )}
+
+                {/* CONTAINER 4: GRID DE AGENDAMENTO E LISTA DE EVENTOS */}
+                <div className="grid grid-cols-1 xl:grid-cols-12 gap-6 items-start">
+                  <form
+                    onSubmit={handleCreateNewEvent}
+                    className="xl:col-span-6 bg-[#111726] border border-slate-800/90 rounded-3xl p-6 space-y-4 shadow-xl"
+                  >
+                    <div className="border-b border-slate-800/80 pb-3">
+                      <h2 className="text-lg font-extrabold text-white">+ Agendar novo evento</h2>
+                      <p className="text-xs text-slate-400">Mais um motivo para reunir quem você gosta.</p>
                     </div>
-                  </div>
-                  <span className="text-xs font-bold text-amber-400 bg-[#0A0E17] border border-amber-500/30 px-4 py-2.5 rounded-xl shrink-0">
-                    Ver detalhes / Editar →
-                  </span>
-                </div>
-              )}
 
-              <div className="grid grid-cols-1 xl:grid-cols-12 gap-6 items-start">
-                <form
-                  onSubmit={handleCreateNewEvent}
-                  className="xl:col-span-6 bg-[#111726] border border-slate-800/90 rounded-3xl p-6 space-y-4"
-                >
-                  <div>
-                    <h2 className="text-lg font-extrabold text-white">+ Agendar novo evento</h2>
-                    <p className="text-xs text-slate-400">Mais um motivo para reunir quem você gosta.</p>
-                  </div>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
+                      <div>
+                        <label className="block text-xs font-medium text-slate-300 mb-1.5">
+                          Categoria (Texto livre)
+                        </label>
+                        <input
+                          type="text"
+                          required
+                          value={eventType}
+                          onChange={(e) => setEventType(e.target.value)}
+                          placeholder="Ex: Festa familiar, Aniversário, Futebol..."
+                          className="w-full bg-[#0A0E17] border border-slate-800 rounded-xl px-3.5 py-3 text-xs text-white"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-xs font-medium text-slate-300 mb-1.5">
+                          Quantidade de pessoas *
+                        </label>
+                        <input
+                          type="number"
+                          min="1"
+                          required
+                          value={guestCount}
+                          onChange={(e) => setGuestCount(e.target.value)}
+                          placeholder="Ex: 40"
+                          className="w-full bg-[#0A0E17] border border-slate-800 rounded-xl px-3.5 py-3 text-xs text-white"
+                        />
+                      </div>
+                    </div>
 
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
                     <div>
-                      <label className="block text-xs font-medium text-slate-300 mb-1.5">Categoria (Texto livre)</label>
+                      <label className="block text-xs font-medium text-slate-300 mb-1.5">Título do evento</label>
                       <input
                         type="text"
                         required
-                        value={eventType}
-                        onChange={(e) => setEventType(e.target.value)}
-                        placeholder="Ex: Festa familiar, Aniversário, Futebol..."
+                        value={title}
+                        onChange={(e) => setTitle(e.target.value)}
+                        placeholder="Almoço de domingo"
                         className="w-full bg-[#0A0E17] border border-slate-800 rounded-xl px-3.5 py-3 text-xs text-white"
                       />
                     </div>
+
+                    <div className="grid grid-cols-3 gap-3">
+                      <div>
+                        <label className="block text-xs font-medium text-slate-300 mb-1.5">Data</label>
+                        <input
+                          type="date"
+                          required
+                          value={eventDate}
+                          onChange={(e) => setEventDate(e.target.value)}
+                          className="w-full bg-[#0A0E17] border border-slate-800 rounded-xl px-3 py-2.5 text-xs text-white"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-xs font-medium text-slate-300 mb-1.5">Início</label>
+                        <input
+                          type="time"
+                          required
+                          value={startTime}
+                          onChange={(e) => setStartTime(e.target.value)}
+                          className="w-full bg-[#0A0E17] border border-slate-800 rounded-xl px-3 py-2.5 text-xs text-white"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-xs font-medium text-slate-300 mb-1.5">Término</label>
+                        <input
+                          type="time"
+                          required
+                          value={endTime}
+                          onChange={(e) => setEndTime(e.target.value)}
+                          className="w-full bg-[#0A0E17] border border-slate-800 rounded-xl px-3 py-2.5 text-xs text-white"
+                        />
+                      </div>
+                    </div>
+
+                    {!conflict ? (
+                      <div className="px-4 py-2.5 rounded-xl bg-emerald-950/50 border border-emerald-500/30 text-emerald-400 text-xs">
+                        ✓ Data disponível · Sem conflito de horário
+                      </div>
+                    ) : (
+                      <div className="px-4 py-2.5 rounded-xl bg-red-950/50 border border-red-500/30 text-red-300 text-xs">
+                        ✕ Horário indisponível nesta data
+                      </div>
+                    )}
+
+                    <button
+                      type="submit"
+                      className="w-full bg-[#F59E0B] hover:bg-amber-400 text-slate-950 font-bold py-3.5 rounded-2xl text-xs transition"
+                    >
+                      Solicitar agendamento →
+                    </button>
+                  </form>
+
+                  <section className="xl:col-span-6 bg-[#111726] border border-slate-800/90 rounded-3xl p-6 space-y-4 shadow-xl">
+                    <div className="flex justify-between items-center border-b border-slate-800/80 pb-3">
+                      <div>
+                        <h2 className="text-lg font-extrabold text-white">Meus eventos marcados</h2>
+                        <p className="text-[11px] text-slate-400">Clique em um evento para abrir as opções</p>
+                      </div>
+                      <span className="text-xs bg-[#0A0E17] border border-slate-800 px-3 py-1 rounded-full text-amber-400 font-semibold">
+                        {myEvents.length} evento(s)
+                      </span>
+                    </div>
+
+                    {myEvents.length === 0 ? (
+                      <p className="text-xs text-slate-500 py-8 text-center">
+                        Você ainda não possui eventos marcados no Supabase. Use o formulário ao lado para reservar!
+                      </p>
+                    ) : (
+                      <div className="space-y-3">
+                        {myEvents.map((ev) => (
+                          <div
+                            key={ev.id}
+                            onClick={() => handleOpenEventModal(ev)}
+                            className="cursor-pointer bg-[#0A0E17] hover:bg-[#131B2E] border border-slate-800 hover:border-amber-500/50 rounded-2xl p-4 space-y-2 transition group"
+                          >
+                            <div className="flex items-center justify-between">
+                              <span
+                                className={`inline-block text-[10px] font-bold px-2.5 py-0.5 rounded-full ${getStatusBadgeClasses(
+                                  ev.status
+                                )}`}
+                              >
+                                {ev.status === "CONFIRMADO"
+                                  ? "✓ Confirmado"
+                                  : ev.status === "CANCELADO"
+                                  ? "✕ Cancelado"
+                                  : "● Pendente"}
+                              </span>
+                              <span className="text-[11px] text-amber-400 opacity-80 group-hover:opacity-100 font-semibold">
+                                Abrir detalhes →
+                              </span>
+                            </div>
+                            <h3 className="font-bold text-sm text-white">
+                              {ev.title} <span className="text-xs font-normal text-amber-400">({ev.eventType})</span>
+                            </h3>
+                            <p className="text-xs text-slate-400">
+                              📅 {ev.eventDate} · 🕒 {ev.startTime} - {ev.endTime} (GMT-3)
+                            </p>
+                            <p className="text-xs text-slate-500">
+                              Quantidade: <strong className="text-slate-300">{ev.honoreeName}</strong> · Resp.:{" "}
+                              {ev.responsibleAdmin}
+                            </p>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </section>
+                </div>
+              </div>
+            )}
+
+            {/* CONTAINER 5: ABA MINHA CONTA (CARD #40: SEM CPF/CNPJ) */}
+            {activeTab === "MINHA_CONTA" && (
+              <div className="grid grid-cols-1 xl:grid-cols-12 gap-6 items-start">
+                <form
+                  onSubmit={handleSaveProfile}
+                  className="xl:col-span-6 bg-[#111726] border border-slate-800/90 rounded-3xl p-6 space-y-4 shadow-xl"
+                >
+                  <div className="flex items-center justify-between border-b border-slate-800/80 pb-3">
                     <div>
-                      <label className="block text-xs font-medium text-slate-300 mb-1.5">
-                        Quantidade de pessoas *
-                      </label>
-                      <input
-                        type="number"
-                        min="1"
-                        required
-                        value={guestCount}
-                        onChange={(e) => setGuestCount(e.target.value)}
-                        placeholder="Ex: 40"
-                        className="w-full bg-[#0A0E17] border border-slate-800 rounded-xl px-3.5 py-3 text-xs text-white"
-                      />
+                      <h2 className="text-lg font-extrabold text-white">Seus dados pessoais</h2>
+                      <p className="text-xs text-slate-400">Sincronizados em tempo real no Supabase.</p>
                     </div>
+                    <span className="text-xs font-mono bg-[#0A0E17] border border-slate-800 px-3 py-1.5 rounded-xl text-amber-400 font-bold">
+                      ID #{currentUser?.id}
+                    </span>
                   </div>
 
                   <div>
-                    <label className="block text-xs font-medium text-slate-300 mb-1.5">Título do evento</label>
+                    <label className="block text-xs font-medium text-slate-300 mb-1.5">Nome completo *</label>
                     <input
                       type="text"
                       required
-                      value={title}
-                      onChange={(e) => setTitle(e.target.value)}
-                      placeholder="Almoço de domingo"
+                      value={myName}
+                      onChange={(e) => setMyName(e.target.value)}
                       className="w-full bg-[#0A0E17] border border-slate-800 rounded-xl px-3.5 py-3 text-xs text-white"
                     />
                   </div>
 
-                  <div className="grid grid-cols-3 gap-3">
-                    <div>
-                      <label className="block text-xs font-medium text-slate-300 mb-1.5">Data</label>
-                      <input
-                        type="date"
-                        required
-                        value={eventDate}
-                        onChange={(e) => setEventDate(e.target.value)}
-                        className="w-full bg-[#0A0E17] border border-slate-800 rounded-xl px-3 py-2.5 text-xs text-white"
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-xs font-medium text-slate-300 mb-1.5">Início</label>
-                      <input
-                        type="time"
-                        required
-                        value={startTime}
-                        onChange={(e) => setStartTime(e.target.value)}
-                        className="w-full bg-[#0A0E17] border border-slate-800 rounded-xl px-3 py-2.5 text-xs text-white"
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-xs font-medium text-slate-300 mb-1.5">Término</label>
-                      <input
-                        type="time"
-                        required
-                        value={endTime}
-                        onChange={(e) => setEndTime(e.target.value)}
-                        className="w-full bg-[#0A0E17] border border-slate-800 rounded-xl px-3 py-2.5 text-xs text-white"
-                      />
-                    </div>
+                  <div>
+                    <label className="block text-xs font-medium text-slate-300 mb-1.5">E-mail de Login *</label>
+                    <input
+                      type="email"
+                      required
+                      value={myEmail}
+                      onChange={(e) => setMyEmail(e.target.value)}
+                      className="w-full bg-[#0A0E17] border border-slate-800 rounded-xl px-3.5 py-3 text-xs text-white"
+                    />
                   </div>
 
-                  {!conflict ? (
-                    <div className="px-4 py-2.5 rounded-xl bg-emerald-950/50 border border-emerald-500/30 text-emerald-400 text-xs">
-                      ✓ Data disponível · Sem conflito de horário
-                    </div>
-                  ) : (
-                    <div className="px-4 py-2.5 rounded-xl bg-red-950/50 border border-red-500/30 text-red-300 text-xs">
-                      ✕ Horário indisponível nesta data
-                    </div>
-                  )}
+                  <div>
+                    <label className="block text-xs font-medium text-slate-300 mb-1.5">Telefone ANATEL *</label>
+                    <input
+                      type="tel"
+                      required
+                      value={myPhone}
+                      onChange={(e) => setMyPhone(applyAnatelPhoneMask(e.target.value))}
+                      className="w-full bg-[#0A0E17] border border-slate-800 rounded-xl px-3.5 py-3 text-xs font-mono text-white"
+                    />
+                    {phoneCheck.valid && (
+                      <div className="mt-2 px-3.5 py-2 rounded-xl bg-emerald-950/50 border border-emerald-500/30 text-emerald-400 text-xs font-semibold">
+                        ✓ {phoneCheck.regionUf?.replace(" - ", " · ")} · DDD válido
+                      </div>
+                    )}
+                  </div>
 
                   <button
                     type="submit"
                     className="w-full bg-[#F59E0B] hover:bg-amber-400 text-slate-950 font-bold py-3.5 rounded-2xl text-xs transition"
                   >
-                    Solicitar agendamento →
+                    Salvar alterações no Supabase
                   </button>
                 </form>
 
-                <div className="xl:col-span-6 bg-[#111726] border border-slate-800/90 rounded-3xl p-6 space-y-4">
-                  <div className="flex justify-between items-center">
-                    <div>
-                      <h2 className="text-lg font-extrabold text-white">Meus eventos marcados</h2>
-                      <p className="text-[11px] text-slate-400">Clique em um evento para abrir as opções</p>
-                    </div>
-                    <span className="text-xs text-slate-400">{myEvents.length} evento(s)</span>
+                <form
+                  onSubmit={handleUpdatePassword}
+                  className="xl:col-span-6 bg-[#111726] border border-slate-800/90 rounded-3xl p-6 space-y-4 shadow-xl"
+                >
+                  <div className="border-b border-slate-800/80 pb-3">
+                    <h2 className="text-lg font-extrabold text-white">Segurança da senha (RBAC)</h2>
+                    <p className="text-xs text-slate-400">Mínimo de 8 caracteres e 1 caractere especial.</p>
                   </div>
 
-                  {myEvents.length === 0 ? (
-                    <p className="text-xs text-slate-500 py-8 text-center">
-                      Você ainda não possui eventos marcados no Supabase. Use o formulário ao lado para reservar!
-                    </p>
-                  ) : (
-                    <div className="space-y-3">
-                      {myEvents.map((ev) => (
-                        <div
-                          key={ev.id}
-                          onClick={() => handleOpenEventModal(ev)}
-                          className="cursor-pointer bg-[#0A0E17] hover:bg-[#131B2E] border border-slate-800 hover:border-amber-500/50 rounded-2xl p-4 space-y-2 transition group"
-                        >
-                          <div className="flex items-center justify-between">
-                            <span
-                              className={`inline-block text-[10px] font-bold px-2.5 py-0.5 rounded-full ${getStatusBadgeClasses(
-                                ev.status
-                              )}`}
-                            >
-                              {ev.status === "CONFIRMADO"
-                                ? "✓ Confirmado"
-                                : ev.status === "CANCELADO"
-                                ? "✕ Cancelado"
-                                : "● Pendente"}
-                            </span>
-                            <span className="text-[11px] text-amber-400 opacity-80 group-hover:opacity-100 font-semibold">
-                              Abrir detalhes →
-                            </span>
-                          </div>
-                          <h3 className="font-bold text-sm text-white">
-                            {ev.title} <span className="text-xs font-normal text-amber-400">({ev.eventType})</span>
-                          </h3>
-                          <p className="text-xs text-slate-400">
-                            📅 {ev.eventDate} · 🕒 {ev.startTime} - {ev.endTime} (GMT-3)
-                          </p>
-                          <p className="text-xs text-slate-500">
-                            Quantidade: <strong className="text-slate-300">{ev.honoreeName}</strong> · Resp.:{" "}
-                            {ev.responsibleAdmin}
-                          </p>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              </div>
-            </div>
-          )}
-
-          {activeTab === "MINHA_CONTA" && (
-            <div className="grid grid-cols-1 xl:grid-cols-12 gap-6 items-start">
-              <form
-                onSubmit={handleSaveProfile}
-                className="xl:col-span-6 bg-[#111726] border border-slate-800/90 rounded-3xl p-6 space-y-4"
-              >
-                <div className="flex items-center justify-between">
                   <div>
-                    <h2 className="text-lg font-extrabold text-white">Seus dados</h2>
-                    <p className="text-xs text-slate-400">Sincronizados em tempo real no Supabase.</p>
+                    <label className="block text-xs font-medium text-slate-300 mb-1.5">Senha atual</label>
+                    <input
+                      type="password"
+                      required
+                      value={currentPassword}
+                      onChange={(e) => setCurrentPassword(e.target.value)}
+                      placeholder="••••••••••••"
+                      className="w-full bg-[#0A0E17] border border-slate-800 rounded-xl px-3.5 py-3 text-xs text-white"
+                    />
                   </div>
-                  <span className="text-xs font-mono bg-[#0A0E17] border border-slate-800 px-3 py-1 rounded-lg text-amber-400">
-                    ID: {currentUser?.id}
-                  </span>
-                </div>
 
-                <div>
-                  <label className="block text-xs font-medium text-slate-300 mb-1.5">Nome completo</label>
-                  <input
-                    type="text"
-                    required
-                    value={myName}
-                    onChange={(e) => setMyName(e.target.value)}
-                    className="w-full bg-[#0A0E17] border border-slate-800 rounded-xl px-3.5 py-3 text-xs text-white"
-                  />
-                </div>
+                  <div>
+                    <label className="block text-xs font-medium text-slate-300 mb-1.5">Nova senha</label>
+                    <input
+                      type="password"
+                      required
+                      value={newPassword}
+                      onChange={(e) => setNewPassword(e.target.value)}
+                      placeholder="••••••••••••••"
+                      className="w-full bg-[#0A0E17] border border-slate-800 rounded-xl px-3.5 py-3 text-xs text-white"
+                    />
+                  </div>
 
-                <div>
-                  <label className="block text-xs font-medium text-slate-300 mb-1.5">E-mail</label>
-                  <input
-                    type="email"
-                    required
-                    value={myEmail}
-                    onChange={(e) => setMyEmail(e.target.value)}
-                    className="w-full bg-[#0A0E17] border border-slate-800 rounded-xl px-3.5 py-3 text-xs text-white"
-                  />
-                </div>
+                  <div className="grid grid-cols-2 gap-2 text-xs bg-[#0A0E17] border border-slate-800 p-3.5 rounded-2xl">
+                    <span className={pwCheck.minLength ? "text-emerald-400 font-bold" : "text-slate-500"}>
+                      ✓ Mínimo de 8 caracteres
+                    </span>
+                    <span className={pwCheck.hasSpecial ? "text-emerald-400 font-bold" : "text-slate-500"}>
+                      ✓ 1 caractere especial
+                    </span>
+                    <span className={pwCheck.hasUpper && pwCheck.hasLower ? "text-emerald-400" : "text-slate-500"}>
+                      ✓ Maiúscula e minúscula
+                    </span>
+                    <span className={pwCheck.hasNumber ? "text-emerald-400" : "text-slate-500"}>
+                      ✓ Pelo menos 1 número
+                    </span>
+                  </div>
 
-                <div>
-                  <label className="block text-xs font-medium text-slate-300 mb-1.5">Telefone ANATEL</label>
-                  <input
-                    type="tel"
-                    required
-                    value={myPhone}
-                    onChange={(e) => setMyPhone(applyAnatelPhoneMask(e.target.value))}
-                    className="w-full bg-[#0A0E17] border border-slate-800 rounded-xl px-3.5 py-3 text-xs font-mono text-white"
-                  />
-                  {phoneCheck.valid && (
-                    <div className="mt-2 px-3.5 py-2 rounded-xl bg-emerald-950/50 border border-emerald-500/30 text-emerald-400 text-xs font-semibold">
-                      ✓ {phoneCheck.regionUf?.replace(" - ", " · ")} · DDD válido
-                    </div>
-                  )}
-                </div>
+                  <div>
+                    <label className="block text-xs font-medium text-slate-300 mb-1.5">Confirme a nova senha</label>
+                    <input
+                      type="password"
+                      required
+                      value={confirmPassword}
+                      onChange={(e) => setConfirmPassword(e.target.value)}
+                      placeholder="••••••••••••••"
+                      className="w-full bg-[#0A0E17] border border-slate-800 rounded-xl px-3.5 py-3 text-xs text-white"
+                    />
+                  </div>
 
-                <div>
-                  <label className="block text-xs font-medium text-slate-300 mb-1.5">CPF/CNPJ (opcional)</label>
-                  <input
-                    type="text"
-                    value={myCpfCnpj}
-                    onChange={(e) => setMyCpfCnpj(e.target.value)}
-                    placeholder="000.000.000-00"
-                    className="w-full bg-[#0A0E17] border border-slate-800 rounded-xl px-3.5 py-3 text-xs text-white"
-                  />
-                </div>
-
-                <button
-                  type="submit"
-                  className="w-full bg-[#F59E0B] hover:bg-amber-400 text-slate-950 font-bold py-3.5 rounded-2xl text-xs transition"
-                >
-                  Salvar alterações no Supabase
-                </button>
-              </form>
-
-              <form
-                onSubmit={handleUpdatePassword}
-                className="xl:col-span-6 bg-[#111726] border border-slate-800/90 rounded-3xl p-6 space-y-4"
-              >
-                <div>
-                  <h2 className="text-lg font-extrabold text-white">Segurança da senha (RBAC)</h2>
-                  <p className="text-xs text-slate-400">Mínimo de 8 caracteres e 1 caractere especial.</p>
-                </div>
-
-                <div>
-                  <label className="block text-xs font-medium text-slate-300 mb-1.5">Senha atual</label>
-                  <input
-                    type="password"
-                    required
-                    value={currentPassword}
-                    onChange={(e) => setCurrentPassword(e.target.value)}
-                    placeholder="••••••••••••"
-                    className="w-full bg-[#0A0E17] border border-slate-800 rounded-xl px-3.5 py-3 text-xs text-white"
-                  />
-                </div>
-
-                <div>
-                  <label className="block text-xs font-medium text-slate-300 mb-1.5">Nova senha</label>
-                  <input
-                    type="password"
-                    required
-                    value={newPassword}
-                    onChange={(e) => setNewPassword(e.target.value)}
-                    placeholder="••••••••••••••"
-                    className="w-full bg-[#0A0E17] border border-slate-800 rounded-xl px-3.5 py-3 text-xs text-white"
-                  />
-                </div>
-
-                <div className="grid grid-cols-2 gap-2 text-xs bg-[#0A0E17] border border-slate-800 p-3.5 rounded-2xl">
-                  <span className={pwCheck.minLength ? "text-emerald-400 font-bold" : "text-slate-500"}>
-                    ✓ Mínimo de 8 caracteres
-                  </span>
-                  <span className={pwCheck.hasSpecial ? "text-emerald-400 font-bold" : "text-slate-500"}>
-                    ✓ 1 caractere especial
-                  </span>
-                  <span className={pwCheck.hasUpper && pwCheck.hasLower ? "text-emerald-400" : "text-slate-500"}>
-                    ✓ Maiúscula e minúscula
-                  </span>
-                  <span className={pwCheck.hasNumber ? "text-emerald-400" : "text-slate-500"}>
-                    ✓ Pelo menos 1 número
-                  </span>
-                </div>
-
-                <div>
-                  <label className="block text-xs font-medium text-slate-300 mb-1.5">Confirme a nova senha</label>
-                  <input
-                    type="password"
-                    required
-                    value={confirmPassword}
-                    onChange={(e) => setConfirmPassword(e.target.value)}
-                    placeholder="••••••••••••••"
-                    className="w-full bg-[#0A0E17] border border-slate-800 rounded-xl px-3.5 py-3 text-xs text-white"
-                  />
-                </div>
-
-                <button
-                  type="submit"
-                  className="w-full bg-[#192236] hover:bg-slate-800 text-amber-400 border border-amber-500/30 font-bold py-3.5 rounded-2xl text-xs transition"
-                >
-                  Atualizar minha senha no Supabase
-                </button>
-              </form>
-            </div>
-          )}
+                  <button
+                    type="submit"
+                    className="w-full bg-[#192236] hover:bg-slate-800 text-amber-400 border border-amber-500/30 font-bold py-3.5 rounded-2xl text-xs transition"
+                  >
+                    Atualizar minha senha no Supabase
+                  </button>
+                </form>
+              </div>
+            )}
+          </div>
         </main>
       </div>
 
+      {/* CONTAINER 6: MODAL DE DETALHES E EDIÇÃO DO EVENTO */}
       {selectedEvent && (
         <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-sm flex items-center justify-center p-4">
           <div className="bg-[#111726] border border-slate-700 rounded-3xl max-w-lg w-full p-6 space-y-5 shadow-2xl">

@@ -2,6 +2,10 @@
 import { NextResponse } from "next/server";
 import nodemailer from "nodemailer";
 
+// Garante execução em Node.js puro na Netlify (evita falha de socket TLS no Edge Runtime)
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+
 export async function POST(request: Request) {
   try {
     const { email, userName, resetUrl } = await request.json();
@@ -13,25 +17,40 @@ export async function POST(request: Request) {
       );
     }
 
-    const gmailUser = (process.env.GMAIL_USER || "").trim();
-    const gmailPass = (process.env.GMAIL_APP_PASSWORD || "").replace(/\s+/g, "");
+    const gmailUser = (
+      process.env.GMAIL_USER ||
+      process.env.NEXT_PUBLIC_GMAIL_USER ||
+      ""
+    ).trim();
+
+    const gmailPass = (
+      process.env.GMAIL_APP_PASSWORD ||
+      process.env.NEXT_PUBLIC_GMAIL_APP_PASSWORD ||
+      ""
+    ).replace(/\s+/g, "");
 
     if (!gmailUser || !gmailPass) {
       return NextResponse.json(
         {
           error:
-            "Configure GMAIL_USER e GMAIL_APP_PASSWORD no arquivo .env.local e reinicie o servidor (npm run dev).",
+            "Credenciais SMTP ausentes. Cadastre GMAIL_USER e GMAIL_APP_PASSWORD em Environment Variables na Netlify (ou no .env.local).",
         },
         { status: 500 }
       );
     }
 
+    // Configuração explícita na porta 465 (SSL) compatível com AWS Lambda / Netlify Functions
     const transporter = nodemailer.createTransport({
-      service: "gmail",
+      host: "smtp.gmail.com",
+      port: 465,
+      secure: true,
       auth: {
         user: gmailUser,
         pass: gmailPass,
       },
+      connectionTimeout: 10000,
+      greetingTimeout: 10000,
+      socketTimeout: 15000,
     });
 
     const htmlBody = `
@@ -70,17 +89,26 @@ export async function POST(request: Request) {
       </div>
     `;
 
-    await transporter.sendMail({
-      from: `"Churrasco dos Da Hora" <${gmailUser}>`,
-      to: email,
-      subject: "🔒 Link para Redefinir sua Senha — Churrasco dos Da Hora",
-      html: htmlBody,
+    await new Promise<void>((resolve, reject) => {
+      transporter.sendMail(
+        {
+          from: `"Churrasco dos Da Hora" <${gmailUser}>`,
+          to: email.trim(),
+          subject: "🔒 Link para Redefinir sua Senha — Churrasco dos Da Hora",
+          html: htmlBody,
+        },
+        (err) => {
+          if (err) reject(err);
+          else resolve();
+        }
+      );
     });
 
     return NextResponse.json({ ok: true });
   } catch (err: unknown) {
-    const message = err instanceof Error ? err.message : "Falha ao enviar e-mail via Gmail.";
-    console.error("Erro no envio de e-mail Gmail:", message);
+    const message =
+      err instanceof Error ? err.message : "Falha ao enviar e-mail via Gmail SMTP na Netlify.";
+    console.error("Erro SMTP Recover Password:", message);
     return NextResponse.json({ error: message }, { status: 500 });
   }
 }
