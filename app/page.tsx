@@ -15,22 +15,31 @@ import {
   saveUsersToStorage,
   saveEventsToStorage,
   setCurrentUserSession,
+  lockUserAccountByEmailInSupabase,
+  isFirstLoginPasswordChangeRequired,
+  markIsoPasswordChanged,
+  markIsoForFirstLogin,
+  getCorporateIdentityInfo,
+  getEmergencyMaintenanceState,
   UserAccount,
   EventRecord,
 } from "../lib/services/storage";
 
-type ActiveTab = "LOGIN" | "ESQUECI_SENHA" | "TROCAR_SENHA" | "AGENDE_EVENTO";
+type ActiveTab =
+  | "LOGIN"
+  | "ESQUECI_SENHA"
+  | "TROCAR_SENHA"
+  | "PRIMEIRO_ACESSO"
+  | "AGENDE_EVENTO";
 
-// Gera um token com validade de 15 minutos vinculado ao e-mail
 function createResetToken(email: string): string {
   const payload = {
     e: email.trim().toLowerCase(),
-    exp: Date.now() + 15 * 60 * 1000, // 15 minutos
+    exp: Date.now() + 15 * 60 * 1000,
   };
   return btoa(JSON.stringify(payload));
 }
 
-// Valida se o token do link pertence ao e-mail e ainda está dentro dos 15 minutos
 function verifyResetToken(token: string, email: string): { valid: boolean; reason?: string } {
   try {
     const decoded = JSON.parse(atob(token)) as { e: string; exp: number };
@@ -49,6 +58,7 @@ function verifyResetToken(token: string, email: string): { valid: boolean; reaso
 export default function LoginAndPublicPortal() {
   const [activeTab, setActiveTab] = useState<ActiveTab>("LOGIN");
   const [isLoadingCloud, setIsLoadingCloud] = useState<boolean>(true);
+  const [isEmergencyActive, setIsEmergencyActive] = useState<boolean>(false);
 
   const [allUsers, setAllUsers] = useState<UserAccount[]>([]);
   const [allEvents, setAllEvents] = useState<EventRecord[]>([]);
@@ -59,20 +69,39 @@ export default function LoginAndPublicPortal() {
   const [showPassword, setShowPassword] = useState(false);
   const [failedAttempts, setFailedAttempts] = useState(0);
   const [lockedUntil, setLockedUntil] = useState<number | null>(null);
-  const [loginFeedback, setLoginFeedback] = useState<{ type: "error" | "success" | "warn"; text: string } | null>(null);
+  const [loginFeedback, setLoginFeedback] = useState<{
+    type: "error" | "success" | "warn";
+    text: string;
+  } | null>(null);
 
-  // Estados do "Esqueci minha senha" (Disparo de e-mail real para o Gmail)
+  // CARD #42: Estados da Troca Obrigatória de Senha no 1º Login (Todos os Perfis)
+  const [firstAccessUser, setFirstAccessUser] = useState<UserAccount | null>(null);
+  const [firstAccessNewPassword, setFirstAccessNewPassword] = useState("");
+  const [firstAccessConfirmPassword, setFirstAccessConfirmPassword] = useState("");
+  const [showFirstAccessPassword, setShowFirstAccessPassword] = useState(false);
+  const [firstAccessFeedback, setFirstAccessFeedback] = useState<{
+    type: "error" | "success";
+    text: string;
+  } | null>(null);
+
+  // Estados do "Esqueci minha senha" (Disparo de e-mail via Netlify / Gmail)
   const [recoveryEmail, setRecoveryEmail] = useState("");
   const [isSendingEmail, setIsSendingEmail] = useState(false);
-  const [recoveryFeedback, setRecoveryFeedback] = useState<{ type: "error" | "success"; text: string } | null>(null);
+  const [recoveryFeedback, setRecoveryFeedback] = useState<{
+    type: "error" | "success";
+    text: string;
+  } | null>(null);
 
-  // Estados da Aba Exclusiva "TROCAR_SENHA" (Aberta ao clicar no link do Gmail)
+  // Estados da Aba Exclusiva "TROCAR_SENHA" (Aberta via link do Gmail)
   const [linkEmail, setLinkEmail] = useState("");
   const [linkToken, setLinkToken] = useState("");
   const [newResetPassword, setNewResetPassword] = useState("");
   const [confirmResetPassword, setConfirmResetPassword] = useState("");
   const [showResetPassword, setShowResetPassword] = useState(false);
-  const [resetTabFeedback, setResetTabFeedback] = useState<{ type: "error" | "success"; text: string } | null>(null);
+  const [resetTabFeedback, setResetTabFeedback] = useState<{
+    type: "error" | "success";
+    text: string;
+  } | null>(null);
 
   // Estados do "Agende seu evento"
   const [clientName, setClientName] = useState("");
@@ -86,12 +115,15 @@ export default function LoginAndPublicPortal() {
   const [eventDate, setEventDate] = useState("");
   const [startTime, setStartTime] = useState("16:00");
   const [endTime, setEndTime] = useState("21:00");
-  const [scheduleFeedback, setScheduleFeedback] = useState<{ type: "error" | "success"; text: string } | null>(null);
+  const [scheduleFeedback, setScheduleFeedback] = useState<{
+    type: "error" | "success";
+    text: string;
+  } | null>(null);
 
   useEffect(() => {
     setEventDate(getNowGmt3().dateStr);
+    setIsEmergencyActive(getEmergencyMaintenanceState().active);
 
-    // Verifica se o usuário abriu a página através do link enviado para o Gmail
     if (typeof window !== "undefined") {
       const params = new URLSearchParams(window.location.search);
       const tabParam = params.get("tab");
@@ -117,6 +149,8 @@ export default function LoginAndPublicPortal() {
       ? password
       : activeTab === "TROCAR_SENHA"
       ? newResetPassword
+      : activeTab === "PRIMEIRO_ACESSO"
+      ? firstAccessNewPassword
       : clientPassword
   );
   const phoneCheck = validateAnatelPhone(clientPhone);
@@ -135,6 +169,12 @@ export default function LoginAndPublicPortal() {
     return `${String(nextH).padStart(2, "0")}:${String(m).padStart(2, "0")}`;
   };
 
+  const getTargetRouteForRole = (role: UserAccount["role"]) => {
+    if (role === "ADM" || role === "EQUIPE_INTERNA") return "/admin";
+    if (role === "CLIENTE") return "/cliente";
+    return "/equipe";
+  };
+
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoginFeedback(null);
@@ -143,15 +183,18 @@ export default function LoginAndPublicPortal() {
       const minLeft = Math.ceil((lockedUntil - Date.now()) / 60000);
       setLoginFeedback({
         type: "error",
-        text: `Conta bloqueada por segurança. Tente novamente em ${minLeft} min.`,
+        text: `Sessão bloqueada por segurança. Tente novamente em ${minLeft} min ou peça desbloqueio ao ADM.`,
       });
       return;
     }
 
     const cloudData = await fetchAllFromSupabase();
     setAllUsers(cloudData.users);
+    const emergencyState = getEmergencyMaintenanceState();
+    setIsEmergencyActive(emergencyState.active);
 
-    const foundUser = cloudData.users.find((u) => u.email.toLowerCase() === email.trim().toLowerCase());
+    const normalizedEmail = email.trim().toLowerCase();
+    const foundUser = cloudData.users.find((u) => u.email.toLowerCase() === normalizedEmail);
 
     if (!foundUser) {
       setLoginFeedback({
@@ -169,6 +212,18 @@ export default function LoginAndPublicPortal() {
       return;
     }
 
+    // CARDS #45 e #46: Impede login se o usuário estiver com status BLOQUEADO no banco
+    if (foundUser.status === "BLOQUEADO") {
+      setLoginFeedback({
+        type: "error",
+        text: emergencyState.active
+          ? "🚨 Sistema em Modo de Emergência/Manutenção. Apenas o perfil ADM pode acessar no momento."
+          : "🔒 Esta conta está com status BLOQUEADO no sistema após tentativas de erro. Solicite o desbloqueio ao ADM ou redefina sua senha em 'Esqueci minha senha'.",
+      });
+      return;
+    }
+
+    // CARD #46: Contabiliza falhas e grava status BLOQUEADO no Supabase na 5ª tentativa
     if (!pwCheck.isValid || foundUser.password !== password) {
       const newFailures = failedAttempts + 1;
       setFailedAttempts(newFailures);
@@ -176,16 +231,33 @@ export default function LoginAndPublicPortal() {
       if (newFailures >= MAX_LOGIN_ATTEMPTS) {
         const lockTime = Date.now() + LOCKOUT_MINUTES * 60 * 1000;
         setLockedUntil(lockTime);
+
+        const updatedUsers = await lockUserAccountByEmailInSupabase(
+          normalizedEmail,
+          cloudData.users
+        );
+        setAllUsers(updatedUsers);
+
         setLoginFeedback({
           type: "error",
-          text: `Tentativa 5 de 5 · Conta bloqueada por ${LOCKOUT_MINUTES} min.`,
+          text: `Tentativa 5 de 5 · Sua conta (${normalizedEmail}) recebeu status BLOQUEADO no Supabase por segurança.`,
         });
       } else {
         setLoginFeedback({
           type: "error",
-          text: `Senha incorreta ou fora do padrão RBAC. Tentativa ${newFailures} de ${MAX_LOGIN_ATTEMPTS}.`,
+          text: `Senha incorreta ou fora do padrão RBAC. Tentativa ${newFailures} de ${MAX_LOGIN_ATTEMPTS} antes do bloqueio da conta.`,
         });
       }
+      return;
+    }
+
+    // CARD #42: Ao logar pela primeira vez, obriga todos os perfis a trocarem a senha
+    if (isFirstLoginPasswordChangeRequired(foundUser)) {
+      setFirstAccessUser(foundUser);
+      setFirstAccessNewPassword("");
+      setFirstAccessConfirmPassword("");
+      setFirstAccessFeedback(null);
+      setActiveTab("PRIMEIRO_ACESSO");
       return;
     }
 
@@ -202,16 +274,12 @@ export default function LoginAndPublicPortal() {
     setLockedUntil(null);
     setCurrentUserSession(foundUser);
 
-    const targetRoute =
-      foundUser.role === "ADM" || foundUser.role === "EQUIPE_INTERNA"
-        ? "/admin"
-        : foundUser.role === "CLIENTE"
-        ? "/cliente"
-        : "/equipe";
+    const corpInfo = getCorporateIdentityInfo(foundUser);
+    const targetRoute = getTargetRouteForRole(foundUser.role);
 
     setLoginFeedback({
       type: "success",
-      text: `Autenticado no Supabase! Bem-vindo(a), ${foundUser.name} (${foundUser.role})...`,
+      text: `Autenticado [${corpInfo.corporateCode}]! Bem-vindo(a), ${foundUser.name} (${foundUser.role})...`,
     });
 
     setTimeout(() => {
@@ -219,7 +287,68 @@ export default function LoginAndPublicPortal() {
     }, 600);
   };
 
-  // ENVIO REAL DE E-MAIL PARA O GMAIL COM O LINK DA ABA DE TROCA DE SENHA
+  // CARD #42: Confirmação da Troca Obrigatória de Senha no 1º Acesso
+  const handleConfirmFirstAccessPassword = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setFirstAccessFeedback(null);
+
+    if (!firstAccessUser) return;
+
+    if (!pwCheck.isValid) {
+      setFirstAccessFeedback({
+        type: "error",
+        text: "A nova senha deve cumprir todos os requisitos RBAC (mínimo de 8 caracteres, especial, maiúscula, minúscula e número).",
+      });
+      return;
+    }
+
+    if (firstAccessNewPassword === firstAccessUser.password) {
+      setFirstAccessFeedback({
+        type: "error",
+        text: "Por segurança, a sua nova senha pessoal deve ser diferente da senha provisória do primeiro acesso.",
+      });
+      return;
+    }
+
+    if (firstAccessNewPassword !== firstAccessConfirmPassword) {
+      setFirstAccessFeedback({
+        type: "error",
+        text: "A confirmação da nova senha não confere.",
+      });
+      return;
+    }
+
+    const updatedIso = markIsoPasswordChanged();
+    const updatedUser: UserAccount = {
+      ...firstAccessUser,
+      password: firstAccessNewPassword,
+      passwordChangedAtIso: updatedIso,
+      mustChangePassword: false,
+      status: "ATIVO",
+    };
+
+    const cloudData = await fetchAllFromSupabase();
+    const updatedUsers = cloudData.users.map((u) =>
+      u.id === updatedUser.id || u.email.toLowerCase() === updatedUser.email.toLowerCase()
+        ? updatedUser
+        : u
+    );
+
+    setAllUsers(updatedUsers);
+    await saveUsersToStorage(updatedUsers);
+    setCurrentUserSession(updatedUser);
+
+    const targetRoute = getTargetRouteForRole(updatedUser.role);
+    setFirstAccessFeedback({
+      type: "success",
+      text: "✓ Nova senha pessoal gravada no Supabase! Liberando seu acesso ao portal...",
+    });
+
+    setTimeout(() => {
+      window.location.href = targetRoute;
+    }, 800);
+  };
+
   const handleSendRecoveryEmail = async (e: React.FormEvent) => {
     e.preventDefault();
     setRecoveryFeedback(null);
@@ -260,7 +389,7 @@ export default function LoginAndPublicPortal() {
       if (!response.ok) {
         setRecoveryFeedback({
           type: "error",
-          text: result.error || "Não foi possível enviar o e-mail pelo Gmail. Verifique o .env.local.",
+          text: result.error || "Não foi possível enviar o e-mail pelo Gmail. Verifique as variáveis na Netlify.",
         });
         setIsSendingEmail(false);
         return;
@@ -268,7 +397,7 @@ export default function LoginAndPublicPortal() {
 
       setRecoveryFeedback({
         type: "success",
-        text: `✓ E-mail real enviado com sucesso para ${foundUser.email}! Abra sua caixa de entrada do Gmail e clique no botão para acessar a aba de troca de senha.`,
+        text: `✓ E-mail real enviado com sucesso para ${foundUser.email}! Abra sua caixa de entrada do Gmail e clique no botão para redefinir sua senha.`,
       });
     } catch {
       setRecoveryFeedback({
@@ -280,7 +409,6 @@ export default function LoginAndPublicPortal() {
     }
   };
 
-  // SALVAR A NOVA SENHA NA ABA EXCLUSIVA ABERTA PELO LINK DO GMAIL
   const handleConfirmPasswordFromLink = async (e: React.FormEvent) => {
     e.preventDefault();
     setResetTabFeedback(null);
@@ -321,17 +449,22 @@ export default function LoginAndPublicPortal() {
       return;
     }
 
-    const nowIso = new Date().toISOString();
+    const nowIso = markIsoPasswordChanged();
     const updatedUsers = cloudData.users.map((u) =>
       u.email.toLowerCase() === linkEmail.trim().toLowerCase()
-        ? { ...u, password: newResetPassword, passwordChangedAtIso: nowIso }
+        ? {
+            ...u,
+            password: newResetPassword,
+            passwordChangedAtIso: nowIso,
+            mustChangePassword: false,
+            status: u.status === "BLOQUEADO" ? ("ATIVO" as const) : u.status,
+          }
         : u
     );
 
     setAllUsers(updatedUsers);
-    saveUsersToStorage(updatedUsers);
+    await saveUsersToStorage(updatedUsers);
 
-    // Limpa os parâmetros da URL para invalidar o uso repetido na barra de endereços
     if (typeof window !== "undefined") {
       window.history.replaceState({}, document.title, "/");
     }
@@ -339,9 +472,11 @@ export default function LoginAndPublicPortal() {
     setEmail(linkEmail);
     setNewResetPassword("");
     setConfirmResetPassword("");
+    setFailedAttempts(0);
+    setLockedUntil(null);
     setResetTabFeedback({
       type: "success",
-      text: "✓ Senha alterada e salva no Supabase! Redirecionando para o Login...",
+      text: "✓ Senha alterada e conta desbloqueada no Supabase! Redirecionando para o Login...",
     });
 
     setTimeout(() => {
@@ -387,7 +522,6 @@ export default function LoginAndPublicPortal() {
     const cloudData = await fetchAllFromSupabase();
     const normalizedEmail = clientEmail.trim().toLowerCase();
     const existingUser = cloudData.users.find((u) => u.email.toLowerCase() === normalizedEmail);
-    const nowIso = new Date().toISOString();
     const shortId = `CLI-${Math.floor(1000 + Math.random() * 9000)}`;
 
     let loggedUser: UserAccount;
@@ -395,19 +529,23 @@ export default function LoginAndPublicPortal() {
     if (existingUser) {
       loggedUser = existingUser;
     } else {
+      // CARD #42: Marca a conta recém-criada para exigir atualização de senha no primeiro login via formulário
+      const firstLoginIso = markIsoForFirstLogin();
       loggedUser = {
         id: shortId,
-        name: clientName,
+        corporateId: `CDH-CLI-${shortId.split("-")[1]}`,
+        name: clientName.trim(),
         email: normalizedEmail,
         phoneAnatel: phoneCheck.formatted || clientPhone,
         password: clientPassword,
         role: "CLIENTE",
         status: "ATIVO",
-        passwordChangedAtIso: nowIso,
+        passwordChangedAtIso: firstLoginIso,
+        mustChangePassword: true,
       };
       const updatedUsers = [loggedUser, ...cloudData.users];
       setAllUsers(updatedUsers);
-      saveUsersToStorage(updatedUsers);
+      await saveUsersToStorage(updatedUsers);
     }
 
     const formattedGuests = guestCount.includes("pessoa") ? guestCount : `${guestCount} pessoas`;
@@ -429,7 +567,7 @@ export default function LoginAndPublicPortal() {
     };
     const updatedEvents = [newEvent, ...cloudData.events];
     setAllEvents(updatedEvents);
-    saveEventsToStorage(updatedEvents);
+    await saveEventsToStorage(updatedEvents);
 
     setCurrentUserSession(loggedUser);
 
@@ -445,7 +583,8 @@ export default function LoginAndPublicPortal() {
 
   return (
     <div className="min-h-screen bg-[#0A0E17] text-slate-100 flex flex-col justify-between font-sans selection:bg-amber-500 selection:text-slate-950">
-      <header className="w-full border-b border-slate-800/80 bg-[#0A0E17]/90 backdrop-blur-md">
+      {/* CONTAINER 1: CABEÇALHO CORPORATIVO */}
+      <header className="w-full border-b border-slate-800/80 bg-[#0D121E]/90 backdrop-blur-md">
         <div className="max-w-7xl mx-auto px-4 sm:px-8 h-20 flex items-center justify-between gap-4">
           <div className="flex items-center gap-3">
             <div className="w-10 h-10 rounded-xl bg-amber-500/15 border border-amber-500/40 flex items-center justify-center text-amber-400 text-lg font-bold shadow-inner">
@@ -459,22 +598,33 @@ export default function LoginAndPublicPortal() {
             </div>
           </div>
 
-          <div className="flex items-center gap-2 text-[11px] font-semibold tracking-[0.16em] text-slate-400 uppercase">
-            <span className="w-2 h-2 rounded-full bg-emerald-400" />
-            <span>{isLoadingCloud ? "CONECTANDO SUPABASE..." : "SUPABASE & GMAIL CONECTADOS"}</span>
+          <div className="flex items-center gap-3">
+            {isEmergencyActive && (
+              <span className="px-3 py-1 rounded-full bg-red-500/15 border border-red-500/40 text-red-400 text-[10px] font-extrabold uppercase tracking-wider">
+                🚨 Manutenção Ativa (Apenas ADM)
+              </span>
+            )}
+            <div className="flex items-center gap-2 text-[11px] font-semibold tracking-[0.16em] text-slate-400 uppercase bg-[#111726] border border-slate-800 px-3.5 py-1.5 rounded-full">
+              <span className="w-2 h-2 rounded-full bg-emerald-400" />
+              <span>{isLoadingCloud ? "CONECTANDO SUPABASE..." : "SUPABASE & NETLIFY SMTP ATIVOS"}</span>
+            </div>
           </div>
         </div>
       </header>
 
+      {/* CONTAINER 2: CORPO PRINCIPAL EM DUAS COLUNAS */}
       <main className="max-w-7xl w-full mx-auto px-4 sm:px-8 py-8 lg:py-12 grid grid-cols-1 lg:grid-cols-12 gap-10 lg:gap-12 items-start">
+        {/* CONTAINER ESQUERDO: APRESENTAÇÃO E IDENTIDADE CORPORATIVA */}
         <section className="lg:col-span-6 space-y-8 lg:pt-4">
           <div className="inline-flex items-center gap-2 px-3.5 py-1.5 rounded-full bg-amber-500/10 border border-amber-500/30 text-amber-400 text-[11px] font-bold tracking-[0.14em] uppercase">
             <span className="w-1.5 h-1.5 rounded-full bg-amber-400" />
             {activeTab === "AGENDE_EVENTO"
               ? "SEU PRÓXIMO BOM MOMENTO COMEÇA AQUI"
+              : activeTab === "PRIMEIRO_ACESSO"
+              ? "SEGURANÇA RBAC · TROCA OBRIGATÓRIA NO 1º LOGIN"
               : activeTab === "TROCAR_SENHA"
               ? "REDEFINIÇÃO SEGURA DE SENHA VIA LINK DO GMAIL"
-              : "BONS MOMENTOS, BEM ORGANIZADOS"}
+              : "SISTEMA DE IDENTIDADE CORPORATIVA · CDH"}
           </div>
 
           <div className="space-y-4">
@@ -482,30 +632,31 @@ export default function LoginAndPublicPortal() {
               Os melhores <span className="text-amber-500">encontros</span> começam aqui.
             </h1>
             <p className="text-base sm:text-lg text-slate-400 max-w-xl leading-relaxed">
-              Acesso em nuvem via Supabase com recuperação real por e-mail para Administradores, Equipe Interna, Equipe Externa e Clientes.
+              Plataforma corporativa em nuvem via Supabase com governança RBAC, bloqueio automático contra tentativas inválidas e notificações por e-mail.
             </p>
           </div>
 
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 pt-2 border-t border-slate-800/80 max-w-lg text-xs">
-            <div className="bg-[#111726] border border-slate-800 p-3 rounded-xl">
-              <span className="text-amber-400 font-bold block">ADM</span>
+            <div className="bg-[#111726] border border-slate-800 p-3.5 rounded-2xl shadow-md">
+              <span className="text-amber-400 font-bold block">CDH-ADM</span>
               <span className="text-slate-400 text-[11px]">Gestão + Backup</span>
             </div>
-            <div className="bg-[#111726] border border-slate-800 p-3 rounded-xl">
-              <span className="text-purple-400 font-bold block">Eq. Interna</span>
+            <div className="bg-[#111726] border border-slate-800 p-3.5 rounded-2xl shadow-md">
+              <span className="text-purple-400 font-bold block">CDH-INT</span>
               <span className="text-slate-400 text-[11px]">Visão do espaço</span>
             </div>
-            <div className="bg-[#111726] border border-slate-800 p-3 rounded-xl">
-              <span className="text-emerald-400 font-bold block">Eq. Externa</span>
-              <span className="text-slate-400 text-[11px]">Escala e diárias</span>
+            <div className="bg-[#111726] border border-slate-800 p-3.5 rounded-2xl shadow-md">
+              <span className="text-emerald-400 font-bold block">CDH-EXT</span>
+              <span className="text-slate-400 text-[11px]">Escala e turnos</span>
             </div>
-            <div className="bg-[#111726] border border-slate-800 p-3 rounded-xl">
-              <span className="text-sky-400 font-bold block">Clientes</span>
+            <div className="bg-[#111726] border border-slate-800 p-3.5 rounded-2xl shadow-md">
+              <span className="text-sky-400 font-bold block">CDH-CLI</span>
               <span className="text-slate-400 text-[11px]">Reservas online</span>
             </div>
           </div>
         </section>
 
+        {/* CONTAINER DIREITO: CARD DE AUTENTICAÇÃO, 1º ACESSO E AGENDAMENTO */}
         <section className="lg:col-span-6 w-full max-w-xl mx-auto">
           <div className="bg-[#111726] border border-slate-800/90 rounded-3xl p-6 sm:p-8 shadow-2xl">
             <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3 mb-7 pb-4 border-b border-slate-800/80">
@@ -527,12 +678,12 @@ export default function LoginAndPublicPortal() {
                   type="button"
                   onClick={() => setActiveTab("LOGIN")}
                   className={`py-2 px-3.5 rounded-xl text-xs sm:text-sm transition-all ${
-                    activeTab === "LOGIN"
+                    activeTab === "LOGIN" || activeTab === "PRIMEIRO_ACESSO"
                       ? "bg-[#F59E0B] text-slate-950 font-extrabold shadow-md"
                       : "text-slate-400 hover:text-white font-semibold"
                   }`}
                 >
-                  Login
+                  {activeTab === "PRIMEIRO_ACESSO" ? "1º Acesso" : "Login"}
                 </button>
                 <button
                   type="button"
@@ -592,9 +743,14 @@ export default function LoginAndPublicPortal() {
                 </div>
 
                 <div className="bg-[#0A0E17] border border-slate-800/90 rounded-2xl p-4 space-y-3">
-                  <div className="flex items-center gap-2 text-xs font-bold text-slate-200">
-                    <span className="text-amber-500">🔒</span>
-                    <span>RBAC de Senha</span>
+                  <div className="flex items-center justify-between text-xs font-bold text-slate-200">
+                    <div className="flex items-center gap-2">
+                      <span className="text-amber-500">🔒</span>
+                      <span>RBAC de Senha</span>
+                    </div>
+                    <span className="text-[11px] text-slate-400">
+                      Tentativas: {failedAttempts}/{MAX_LOGIN_ATTEMPTS}
+                    </span>
                   </div>
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 text-xs">
                     <div className={pwCheck.minLength ? "text-emerald-400 font-semibold" : "text-slate-500"}>
@@ -614,10 +770,10 @@ export default function LoginAndPublicPortal() {
 
                 {loginFeedback && (
                   <div
-                    className={`px-4 py-3 rounded-xl text-xs font-medium border ${
+                    className={`px-4 py-3 rounded-xl text-xs font-medium border leading-relaxed ${
                       loginFeedback.type === "success"
                         ? "bg-emerald-950/50 border-emerald-500/40 text-emerald-300"
-                        : "bg-orange-950/40 border-orange-500/30 text-orange-400"
+                        : "bg-red-950/50 border-red-500/40 text-red-300"
                     }`}
                   >
                     {loginFeedback.text}
@@ -634,13 +790,121 @@ export default function LoginAndPublicPortal() {
               </form>
             )}
 
-            {/* ABA 2: ESQUECI MINHA SENHA (DISPARO REAL PARA O GMAIL) */}
+            {/* ABA 2 (CARD #42): TROCA OBRIGATÓRIA DE SENHA NO PRIMEIRO LOGIN (TODOS OS PERFIS) */}
+            {activeTab === "PRIMEIRO_ACESSO" && firstAccessUser && (
+              <form onSubmit={handleConfirmFirstAccessPassword} className="space-y-5">
+                <div className="bg-amber-500/10 border border-amber-500/30 rounded-2xl p-4 space-y-1.5">
+                  <div className="flex items-center justify-between">
+                    <span className="text-[10px] font-extrabold uppercase tracking-wider text-amber-400">
+                      🔐 PRIMEIRO LOGIN DETECTADO · {firstAccessUser.role}
+                    </span>
+                    <span className="text-[11px] font-mono text-white bg-[#0A0E17] px-2.5 py-0.5 rounded-lg border border-slate-800">
+                      {getCorporateIdentityInfo(firstAccessUser).corporateCode}
+                    </span>
+                  </div>
+                  <h2 className="text-xl font-extrabold text-white">
+                    Olá, {firstAccessUser.name}! Troque sua senha inicial.
+                  </h2>
+                  <p className="text-xs text-slate-300 leading-relaxed">
+                    Por segurança RBAC, todos os perfis devem cadastrar uma nova senha pessoal no primeiro acesso antes de utilizar o painel.
+                  </p>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-semibold text-slate-300 mb-2">
+                    Nova senha pessoal RBAC (diferente da senha inicial) *
+                  </label>
+                  <div className="relative">
+                    <input
+                      type={showFirstAccessPassword ? "text" : "password"}
+                      required
+                      value={firstAccessNewPassword}
+                      onChange={(e) => setFirstAccessNewPassword(e.target.value)}
+                      placeholder="Digite sua nova senha pessoal"
+                      className="w-full bg-[#0A0E17] border border-slate-800 focus:border-amber-500/70 rounded-xl px-4 py-3.5 text-sm text-white outline-none"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowFirstAccessPassword(!showFirstAccessPassword)}
+                      className="absolute right-4 top-1/2 -translate-y-1/2 text-slate-400 hover:text-white text-xs"
+                    >
+                      {showFirstAccessPassword ? "🙈" : "👁️"}
+                    </button>
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-semibold text-slate-300 mb-2">
+                    Confirme sua nova senha pessoal *
+                  </label>
+                  <input
+                    type={showFirstAccessPassword ? "text" : "password"}
+                    required
+                    value={firstAccessConfirmPassword}
+                    onChange={(e) => setFirstAccessConfirmPassword(e.target.value)}
+                    placeholder="Repita a nova senha"
+                    className="w-full bg-[#0A0E17] border border-slate-800 focus:border-amber-500/70 rounded-xl px-4 py-3.5 text-sm text-white outline-none"
+                  />
+                </div>
+
+                <div className="bg-[#0A0E17] border border-slate-800/90 rounded-2xl p-4 space-y-2.5">
+                  <p className="text-xs font-bold text-slate-200">Checklist obrigatório RBAC:</p>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs">
+                    <div className={pwCheck.minLength ? "text-emerald-400 font-bold" : "text-slate-500"}>
+                      ✓ Mínimo de 8 caracteres
+                    </div>
+                    <div className={pwCheck.hasSpecial ? "text-emerald-400 font-bold" : "text-slate-500"}>
+                      ✓ Caractere especial (!@#$%)
+                    </div>
+                    <div className={pwCheck.hasUpper && pwCheck.hasLower ? "text-emerald-400 font-bold" : "text-slate-500"}>
+                      ✓ Letra maiúscula e minúscula
+                    </div>
+                    <div className={pwCheck.hasNumber ? "text-emerald-400 font-bold" : "text-slate-500"}>
+                      ✓ Pelo menos 1 número
+                    </div>
+                  </div>
+                </div>
+
+                {firstAccessFeedback && (
+                  <div
+                    className={`p-3.5 rounded-xl text-xs font-medium border ${
+                      firstAccessFeedback.type === "success"
+                        ? "bg-emerald-950/60 border-emerald-500 text-emerald-200"
+                        : "bg-red-950/60 border-red-500 text-red-200"
+                    }`}
+                  >
+                    {firstAccessFeedback.text}
+                  </div>
+                )}
+
+                <div className="flex gap-3">
+                  <button
+                    type="submit"
+                    className="flex-1 bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-extrabold py-4 px-6 rounded-2xl transition text-sm shadow-lg shadow-emerald-500/10"
+                  >
+                    ✓ Salvar nova senha e acessar painel →
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setFirstAccessUser(null);
+                      setActiveTab("LOGIN");
+                    }}
+                    className="bg-[#0A0E17] hover:bg-slate-800 text-slate-300 border border-slate-800 font-bold px-4 rounded-2xl text-xs"
+                  >
+                    Voltar
+                  </button>
+                </div>
+              </form>
+            )}
+
+            {/* ABA 3: ESQUECI MINHA SENHA */}
             {activeTab === "ESQUECI_SENHA" && (
               <div className="space-y-5">
                 <div>
                   <h2 className="text-2xl font-extrabold text-white">Recuperar acesso via Gmail</h2>
                   <p className="text-xs sm:text-sm text-slate-400 mt-1">
-                    Digite seu e-mail cadastrado. Enviaremos uma mensagem real com o link direto para a aba de troca de senha.
+                    Digite seu e-mail cadastrado. Enviaremos uma mensagem real com o link direto para a aba de troca de senha e desbloqueio.
                   </p>
                 </div>
 
@@ -681,7 +945,7 @@ export default function LoginAndPublicPortal() {
               </div>
             )}
 
-            {/* ABA 3: TROCAR SENHA (ABERTA PELO LINK ENVIADO AO GMAIL) */}
+            {/* ABA 4: TROCAR SENHA (ABERTA PELO LINK DO GMAIL) */}
             {activeTab === "TROCAR_SENHA" && (
               <form onSubmit={handleConfirmPasswordFromLink} className="space-y-5">
                 <div className="flex items-center justify-between border-b border-slate-800 pb-3">
@@ -772,7 +1036,7 @@ export default function LoginAndPublicPortal() {
               </form>
             )}
 
-            {/* ABA 4: AGENDE SEU EVENTO */}
+            {/* ABA 5: AGENDE SEU EVENTO */}
             {activeTab === "AGENDE_EVENTO" && (
               <form onSubmit={handlePreSchedule} className="space-y-5">
                 <h2 className="text-2xl font-extrabold text-white">Vamos planejar seu evento</h2>
