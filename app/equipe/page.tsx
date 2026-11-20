@@ -10,7 +10,6 @@ import {
   saveStaffToStorage,
   getCurrentUserSession,
   setCurrentUserSession,
-  generateGoogleCalendarUrl,
   UserAccount,
   EventRecord,
   StaffMember,
@@ -23,10 +22,20 @@ export default function StaffPortalPage() {
   const [allStaff, setAllStaff] = useState<StaffMember[]>([]);
   const [events, setEvents] = useState<EventRecord[]>([]);
   const [daysRemaining, setDaysRemaining] = useState<number>(90);
+  const [isLoadingCloud, setIsLoadingCloud] = useState<boolean>(true);
   const [feedback, setFeedback] = useState<{ type: "success" | "error"; text: string } | null>(null);
 
+  // Coluna 1: Estados de "Meus Dados Pessoais e Profissionais"
+  const [myName, setMyName] = useState("");
+  const [myEmail, setMyEmail] = useState("");
   const [myPhone, setMyPhone] = useState("");
+  const [mySpecialty, setMySpecialty] = useState("");
+  const [myCompany, setMyCompany] = useState("");
+
+  // Coluna 2: Estados de "Segurança da Senha (RBAC)"
+  const [currentPassword, setCurrentPassword] = useState("");
   const [newPassword, setNewPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
 
   useEffect(() => {
     const session = getCurrentUserSession();
@@ -35,7 +44,11 @@ export default function StaffPortalPage() {
       return;
     }
     setCurrentUser(session);
+    setMyName(session.name);
+    setMyEmail(session.email);
     setMyPhone(session.phoneAnatel);
+    setMySpecialty(session.specialty || "Prestador Parceiro");
+    setMyCompany(session.companyName || "Autônomo / MEI");
     setDaysRemaining(getPasswordDaysRemaining(session.passwordChangedAtIso));
 
     fetchAllFromSupabase().then((cloudData) => {
@@ -49,9 +62,14 @@ export default function StaffPortalPage() {
       if (freshUser) {
         setCurrentUser(freshUser);
         setCurrentUserSession(freshUser);
+        setMyName(freshUser.name);
+        setMyEmail(freshUser.email);
         setMyPhone(freshUser.phoneAnatel);
+        setMySpecialty(freshUser.specialty || "Prestador Parceiro");
+        setMyCompany(freshUser.companyName || "Autônomo / MEI");
         setDaysRemaining(getPasswordDaysRemaining(freshUser.passwordChangedAtIso));
       }
+      setIsLoadingCloud(false);
     });
   }, []);
 
@@ -60,6 +78,14 @@ export default function StaffPortalPage() {
 
   const isInternal = currentUser?.role === "EQUIPE_INTERNA";
 
+  const getInitials = (name: string) => {
+    if (!name) return "EQ";
+    const parts = name.trim().split(" ");
+    if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
+    return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase();
+  };
+
+  // Eventos cancelados são removidos automaticamente da escala ativa
   const assignedEvents = events.filter((ev) => {
     if (ev.status === "CANCELADO") return false;
     if (isInternal) return true;
@@ -68,7 +94,6 @@ export default function StaffPortalPage() {
     );
   });
 
-  // Confirmar presença na escala e gravar na tabela `events` do Supabase
   const handleConfirmPresence = (eventId: string) => {
     if (!currentUser) return;
     const updated = events.map((ev) => {
@@ -85,27 +110,90 @@ export default function StaffPortalPage() {
     });
   };
 
-  // Atualizar Telefone ANATEL e Senha RBAC na tabela `users` do Supabase
-  const handleUpdateAccount = (e: React.FormEvent) => {
+  // Salvar Dados Pessoais e Profissionais (Coluna 1)
+  const handleSaveProfileData = (e: React.FormEvent) => {
     e.preventDefault();
     if (!currentUser) return;
     if (!phoneCheck.valid) {
       setFeedback({ type: "error", text: phoneCheck.error || "Telefone inválido na regra ANATEL." });
       return;
     }
-    if (newPassword && !pwCheck.isValid) {
-      setFeedback({
-        type: "error",
-        text: "A nova senha deve ter no mínimo 8 caracteres e incluir caractere especial.",
-      });
+
+    const normalizedEmail = myEmail.trim().toLowerCase();
+    const emailConflict = allUsers.some(
+      (u) => u.id !== currentUser.id && u.email.toLowerCase() === normalizedEmail
+    );
+    if (emailConflict) {
+      setFeedback({ type: "error", text: "Este e-mail já está em uso por outra conta no sistema." });
       return;
     }
 
-    const nowIso = newPassword ? new Date().toISOString() : currentUser.passwordChangedAtIso;
+    const formattedPhone = phoneCheck.formatted || myPhone;
     const updatedUser: UserAccount = {
       ...currentUser,
-      phoneAnatel: phoneCheck.formatted || myPhone,
-      password: newPassword || currentUser.password,
+      name: myName.trim(),
+      email: normalizedEmail,
+      phoneAnatel: formattedPhone,
+      specialty: mySpecialty.trim() || currentUser.specialty,
+      companyName: myCompany.trim() || currentUser.companyName,
+    };
+
+    const existsInUsers = allUsers.some((u) => u.id === currentUser.id);
+    const updatedUsers = existsInUsers
+      ? allUsers.map((u) => (u.id === currentUser.id ? updatedUser : u))
+      : [updatedUser, ...allUsers];
+
+    setAllUsers(updatedUsers);
+    saveUsersToStorage(updatedUsers);
+
+    const updatedStaff = allStaff.map((s) =>
+      s.id === currentUser.id || s.email.toLowerCase() === currentUser.email.toLowerCase()
+        ? {
+            ...s,
+            name: updatedUser.name,
+            email: updatedUser.email,
+            phoneAnatel: updatedUser.phoneAnatel,
+            specialty: updatedUser.specialty || s.specialty,
+            companyName: updatedUser.companyName || s.companyName,
+          }
+        : s
+    );
+    setAllStaff(updatedStaff);
+    saveStaffToStorage(updatedStaff);
+
+    setCurrentUser(updatedUser);
+    setCurrentUserSession(updatedUser);
+    setFeedback({
+      type: "success",
+      text: `✓ Seus dados pessoais e profissionais foram salvos no Supabase (${phoneCheck.regionUf})!`,
+    });
+  };
+
+  // Atualizar Senha RBAC (Coluna 2)
+  const handleUpdatePassword = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!currentUser) return;
+
+    if (currentPassword !== currentUser.password) {
+      setFeedback({ type: "error", text: "A senha atual digitada está incorreta." });
+      return;
+    }
+    if (!pwCheck.isValid) {
+      setFeedback({
+        type: "error",
+        text: "A nova senha precisa cumprir os 4 critérios RBAC (mín. 8 caracteres, caractere especial, maiúscula/minúscula e número).",
+      });
+      return;
+    }
+    if (newPassword !== confirmPassword) {
+      setFeedback({ type: "error", text: "A confirmação da nova senha não confere." });
+      return;
+    }
+
+    const nowIso = new Date().toISOString();
+    const updatedUser: UserAccount = {
+      ...currentUser,
+      password: newPassword,
       passwordChangedAtIso: nowIso,
     };
 
@@ -118,17 +206,21 @@ export default function StaffPortalPage() {
     saveUsersToStorage(updatedUsers);
 
     const updatedStaff = allStaff.map((s) =>
-      s.id === currentUser.id
-        ? { ...s, phoneAnatel: updatedUser.phoneAnatel, passwordChangedAtIso: nowIso }
-        : s
+      s.id === currentUser.id ? { ...s, passwordChangedAtIso: nowIso } : s
     );
     setAllStaff(updatedStaff);
     saveStaffToStorage(updatedStaff);
 
     setCurrentUser(updatedUser);
     setCurrentUserSession(updatedUser);
+    setCurrentPassword("");
     setNewPassword("");
-    setFeedback({ type: "success", text: "✓ Dados e senha RBAC atualizados no Supabase!" });
+    setConfirmPassword("");
+    setDaysRemaining(90);
+    setFeedback({
+      type: "success",
+      text: "✓ Senha RBAC atualizada no Supabase! Novo ciclo de validade: 90 dias.",
+    });
   };
 
   return (
@@ -155,8 +247,8 @@ export default function StaffPortalPage() {
               onClick={() => setActiveTab("ESCALA")}
               className={`w-full flex items-center gap-3 px-3.5 py-3 rounded-xl text-xs font-semibold transition ${
                 activeTab === "ESCALA"
-                  ? "bg-[#F59E0B] text-slate-950 font-extrabold"
-                  : "text-slate-400 hover:text-white"
+                  ? "bg-[#F59E0B] text-slate-950 font-extrabold shadow-md"
+                  : "text-slate-400 hover:text-white hover:bg-slate-800/40"
               }`}
             >
               <span>📋</span>
@@ -166,8 +258,8 @@ export default function StaffPortalPage() {
               onClick={() => setActiveTab("CONTA")}
               className={`w-full flex items-center gap-3 px-3.5 py-3 rounded-xl text-xs font-semibold transition ${
                 activeTab === "CONTA"
-                  ? "bg-[#F59E0B] text-slate-950 font-extrabold"
-                  : "text-slate-400 hover:text-white"
+                  ? "bg-[#F59E0B] text-slate-950 font-extrabold shadow-md"
+                  : "text-slate-400 hover:text-white hover:bg-slate-800/40"
               }`}
             >
               <span>👤</span>
@@ -176,61 +268,103 @@ export default function StaffPortalPage() {
           </div>
         </div>
 
-        <div className="border-t border-slate-800/80 pt-4 space-y-2">
-          <p className="text-xs font-bold text-white">{currentUser?.name}</p>
-          <p className="text-[11px] text-amber-400">
-            {isInternal ? "🏠 Equipe Interna (Família)" : `🤝 Terceirizado · R$ ${currentUser?.dailyRate || 0}/diária`}
-          </p>
-          <button
-            onClick={() => {
-              setCurrentUserSession(null);
-              window.location.href = "/";
-            }}
-            className="text-xs text-slate-400 hover:text-rose-400 pt-1 block"
-          >
-            ↪ Sair da conta
-          </button>
+        <div className="hidden lg:flex flex-col gap-4 pt-6">
+          <div className="bg-[#111726] border border-slate-800/90 rounded-2xl p-3.5 space-y-1">
+            <span className="text-[11px] font-semibold text-emerald-400 flex items-center gap-1.5">
+              <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />{" "}
+              {isLoadingCloud ? "Sincronizando..." : "✓ Supabase & Google Agenda"}
+            </span>
+            <p className="text-xs font-bold text-white">Escala Sincronizada</p>
+            <p className="text-[11px] text-slate-400">Eventos cancelados saem automaticamente da sua escala.</p>
+          </div>
+
+          <div className="border-t border-slate-800/80 pt-4 space-y-3">
+            <div className="flex items-center gap-3">
+              <div className="w-9 h-9 rounded-full bg-amber-500/20 border border-amber-500/40 flex items-center justify-center text-amber-300 font-bold text-xs">
+                {getInitials(myName || currentUser?.name || "")}
+              </div>
+              <div className="leading-tight truncate">
+                <p className="text-xs font-bold text-white truncate">{myName || currentUser?.name}</p>
+                <p className="text-[11px] text-amber-400 truncate">
+                  {isInternal
+                    ? "🏠 Equipe Interna"
+                    : `🤝 Terceirizado · R$ ${currentUser?.dailyRate || 0}/diária`}
+                </p>
+              </div>
+            </div>
+            <button
+              onClick={() => {
+                setCurrentUserSession(null);
+                window.location.href = "/";
+              }}
+              className="text-xs text-slate-400 hover:text-red-400 pt-1 block transition"
+            >
+              ↪ Sair da conta
+            </button>
+          </div>
         </div>
       </aside>
 
-      <div className="flex-1 flex flex-col">
-        <header className="border-b border-slate-800/80 px-6 py-5 flex items-center justify-between">
+      <div className="flex-1 flex flex-col min-w-0">
+        <header className="border-b border-slate-800/80 px-6 py-5 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
           <div>
-            <span className="text-[10px] font-bold uppercase tracking-wider text-amber-500">
+            <span className="text-[10px] font-bold uppercase tracking-[0.18em] text-amber-500">
               {isInternal
                 ? "APOIO INTERNO · SUPABASE CLOUD"
-                : `PRESTADOR PARCEIRO · ${currentUser?.specialty || "EQUIPE EXTERNA"}`}
+                : `PRESTADOR PARCEIRO · ${(mySpecialty || currentUser?.specialty || "EQUIPE EXTERNA").toUpperCase()}`}
             </span>
-            <h1 className="text-2xl font-extrabold text-white mt-0.5">
-              Olá, {currentUser?.name.split(" ")[0]}!
+            <h1 className="text-2xl sm:text-3xl font-extrabold text-white mt-0.5">
+              {activeTab === "ESCALA"
+                ? `Olá, ${(myName || currentUser?.name || "Parceiro").split(" ")[0]}!`
+                : "Minha conta"}
             </h1>
+            <p className="text-xs text-slate-400 mt-0.5">
+              {activeTab === "ESCALA"
+                ? "Confira os eventos ativos na sua escala e confirme a sua presença."
+                : "Gerencie seus dados pessoais, informações profissionais, telefone ANATEL e senha RBAC no Supabase."}
+            </p>
           </div>
-          <span className="px-3.5 py-1.5 rounded-full bg-emerald-950/50 border border-emerald-500/30 text-emerald-400 text-xs font-semibold">
-            ✓ Senha válida por {daysRemaining} dias
+          <span className="px-3.5 py-2 rounded-full bg-emerald-950/50 border border-emerald-500/30 text-emerald-400 text-xs font-semibold shrink-0">
+            ✓ Senha válida por mais {daysRemaining} dias
           </span>
         </header>
 
         {feedback && (
           <div
-            className={`mx-6 mt-5 p-3.5 rounded-xl text-xs flex justify-between border ${
+            className={`mx-6 mt-5 p-3.5 rounded-xl text-xs flex justify-between items-center border ${
               feedback.type === "success"
                 ? "bg-emerald-950/60 border-emerald-500/40 text-emerald-200"
-                : "bg-rose-950/60 border-rose-500/40 text-rose-200"
+                : "bg-red-950/60 border-red-500/40 text-red-200"
             }`}
           >
             <span>{feedback.text}</span>
-            <button onClick={() => setFeedback(null)}>✕</button>
+            <button onClick={() => setFeedback(null)} className="font-bold ml-4">
+              ✕
+            </button>
           </div>
         )}
 
-        <main className="p-6">
+        <main className="p-6 space-y-6 flex-1">
           {activeTab === "ESCALA" ? (
-            <div className="bg-[#111726] border border-slate-800 rounded-3xl p-6 space-y-4">
-              <h2 className="text-lg font-extrabold text-white">
-                {isInternal ? "Cronograma de Operação e Preparação (+1h limpeza)" : "Meus Eventos Escalados"}
-              </h2>
+            <div className="bg-[#111726] border border-slate-800/90 rounded-3xl p-6 space-y-4">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div>
+                  <h2 className="text-lg font-extrabold text-white">
+                    {isInternal ? "Cronograma de Operação e Preparação (+1h limpeza)" : "Meus Eventos Escalados"}
+                  </h2>
+                  <p className="text-xs text-slate-400">
+                    Eventos confirmados são sincronizados automaticamente com o Google Agenda.
+                  </p>
+                </div>
+                <span className="text-xs bg-[#0A0E17] border border-slate-800 px-3 py-1 rounded-full text-amber-400 font-semibold">
+                  {assignedEvents.length} evento(s) ativo(s)
+                </span>
+              </div>
+
               {assignedEvents.length === 0 ? (
-                <p className="text-xs text-slate-500 py-6">Nenhum evento escalado para o seu perfil no momento.</p>
+                <p className="text-xs text-slate-500 py-8 text-center">
+                  Nenhum evento ativo escalado para o seu perfil no momento.
+                </p>
               ) : (
                 <div className="space-y-3">
                   {assignedEvents.map((ev) => {
@@ -240,13 +374,27 @@ export default function StaffPortalPage() {
                         key={ev.id}
                         className="bg-[#0A0E17] border border-slate-800 rounded-2xl p-4 flex flex-col sm:flex-row justify-between gap-4"
                       >
-                        <div className="space-y-1">
-                          <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-amber-500/15 text-amber-300">
-                            {ev.eventType} · {ev.eventDate} ({ev.startTime} às {ev.endTime})
-                          </span>
+                        <div className="space-y-1.5">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <span className="text-[10px] font-bold px-2.5 py-0.5 rounded bg-amber-500/15 text-amber-300">
+                              {ev.eventType} · {ev.eventDate} ({ev.startTime} às {ev.endTime})
+                            </span>
+                            <span
+                              className={`text-[10px] font-bold px-2.5 py-0.5 rounded-full border ${
+                                ev.status === "CONFIRMADO"
+                                  ? "bg-emerald-500/15 text-emerald-400 border-emerald-500/40"
+                                  : "bg-orange-500/15 text-orange-400 border-orange-500/40"
+                              }`}
+                            >
+                              {ev.status === "CONFIRMADO"
+                                ? "✓ Confirmado · No Google Agenda"
+                                : "● Pendente de aprovação"}
+                            </span>
+                          </div>
                           <h3 className="font-bold text-sm text-white">{ev.title}</h3>
                           <p className="text-xs text-slate-400">
-                            Para: <strong>{ev.honoreeName}</strong> · Resp. ADM: {ev.responsibleAdmin}
+                            Quantidade: <strong className="text-slate-200">{ev.honoreeName}</strong> · Resp. ADM:{" "}
+                            {ev.responsibleAdmin}
                           </p>
                           {!isInternal && (
                             <p className="text-xs text-emerald-400 font-semibold">
@@ -257,22 +405,14 @@ export default function StaffPortalPage() {
                         <div className="flex items-center gap-2 shrink-0">
                           <button
                             onClick={() => handleConfirmPresence(ev.id)}
-                            className={`px-3.5 py-2 rounded-xl text-xs font-bold transition ${
+                            className={`px-4 py-2.5 rounded-xl text-xs font-bold transition ${
                               isConfirmed
                                 ? "bg-emerald-500/20 text-emerald-300 border border-emerald-500/40"
-                                : "bg-[#F59E0B] text-slate-950"
+                                : "bg-[#F59E0B] hover:bg-amber-400 text-slate-950"
                             }`}
                           >
                             {isConfirmed ? "✓ Presença Confirmada" : "Confirmar Presença"}
                           </button>
-                          <a
-                            href={generateGoogleCalendarUrl(ev)}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            className="bg-slate-800 text-slate-200 px-3 py-2 rounded-xl text-xs font-semibold"
-                          >
-                            📅 GCal
-                          </a>
                         </div>
                       </div>
                     );
@@ -281,38 +421,195 @@ export default function StaffPortalPage() {
               )}
             </div>
           ) : (
-            <form
-              onSubmit={handleUpdateAccount}
-              className="max-w-md bg-[#111726] border border-slate-800 rounded-3xl p-6 space-y-4 text-xs"
-            >
-              <h2 className="text-base font-extrabold text-white">Meus Dados e Senha RBAC</h2>
-              <div>
-                <label className="block text-slate-400 mb-1">Telefone ANATEL</label>
-                <input
-                  type="tel"
-                  required
-                  value={myPhone}
-                  onChange={(e) => setMyPhone(applyAnatelPhoneMask(e.target.value))}
-                  className="w-full bg-[#0A0E17] border border-slate-800 rounded-xl px-3.5 py-2.5 font-mono text-white"
-                />
-              </div>
-              <div>
-                <label className="block text-slate-400 mb-1">Alterar Senha (mín. 8 chars + especial)</label>
-                <input
-                  type="password"
-                  value={newPassword}
-                  onChange={(e) => setNewPassword(e.target.value)}
-                  placeholder="Nova senha RBAC"
-                  className="w-full bg-[#0A0E17] border border-slate-800 rounded-xl px-3.5 py-2.5 text-white"
-                />
-              </div>
-              <button
-                type="submit"
-                className="w-full bg-[#F59E0B] text-slate-950 font-bold py-3 rounded-xl"
+            /* ABA "MINHA CONTA" PADRONIZADA EM 2 COLUNAS (IDÊNTICA AOS PORTAIS DO CLIENTE E ADM) */
+            <div className="grid grid-cols-1 xl:grid-cols-12 gap-6 items-start">
+              {/* COLUNA 1: MEUS DADOS PESSOAIS E PROFISSIONAIS */}
+              <form
+                onSubmit={handleSaveProfileData}
+                className="xl:col-span-6 bg-[#111726] border border-slate-800/90 rounded-3xl p-6 space-y-4"
               >
-                Salvar alterações no Supabase
-              </button>
-            </form>
+                <div className="flex items-center justify-between border-b border-slate-800 pb-4">
+                  <div>
+                    <h2 className="text-lg font-extrabold text-white">Meus Dados Pessoais e Profissionais</h2>
+                    <p className="text-xs text-slate-400">
+                      Sincronizados em tempo real na tabela de usuários e equipe do Supabase.
+                    </p>
+                  </div>
+                  <span className="text-xs font-mono bg-[#0A0E17] border border-slate-800 px-3 py-1.5 rounded-xl text-amber-400 font-bold shrink-0">
+                    ID #{currentUser?.id}
+                  </span>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-medium text-slate-300 mb-1.5">Nome completo *</label>
+                  <input
+                    type="text"
+                    required
+                    value={myName}
+                    onChange={(e) => setMyName(e.target.value)}
+                    placeholder="Seu nome completo"
+                    className="w-full bg-[#0A0E17] border border-slate-800 rounded-xl px-3.5 py-3 text-xs text-white"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-medium text-slate-300 mb-1.5">E-mail de Login *</label>
+                  <input
+                    type="email"
+                    required
+                    value={myEmail}
+                    onChange={(e) => setMyEmail(e.target.value)}
+                    placeholder="seuemail@exemplo.com"
+                    className="w-full bg-[#0A0E17] border border-slate-800 rounded-xl px-3.5 py-3 text-xs text-white"
+                  />
+                </div>
+
+                <div>
+                  <div className="flex justify-between text-xs mb-1.5">
+                    <span className="text-slate-300 font-medium">Telefone ANATEL *</span>
+                    {phoneCheck.valid && (
+                      <span className="text-emerald-400 font-semibold">
+                        ✓ {phoneCheck.regionUf?.replace(" - ", " · ")} · DDD válido
+                      </span>
+                    )}
+                  </div>
+                  <input
+                    type="tel"
+                    required
+                    value={myPhone}
+                    onChange={(e) => setMyPhone(applyAnatelPhoneMask(e.target.value))}
+                    placeholder="(11) 98888-7777"
+                    className="w-full bg-[#0A0E17] border border-slate-800 rounded-xl px-3.5 py-3 text-xs font-mono text-white"
+                  />
+                  {phoneCheck.valid && (
+                    <div className="mt-2 px-3.5 py-2 rounded-xl bg-emerald-950/50 border border-emerald-500/30 text-emerald-400 text-xs font-semibold">
+                      ✓ {phoneCheck.regionUf?.replace(" - ", " · ")} · Formato ANATEL validado
+                    </div>
+                  )}
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
+                  <div>
+                    <label className="block text-xs font-medium text-slate-300 mb-1.5">
+                      Especialidade / Função *
+                    </label>
+                    <input
+                      type="text"
+                      required
+                      value={mySpecialty}
+                      onChange={(e) => setMySpecialty(e.target.value)}
+                      placeholder="Ex: Garçom, Churrasqueiro, Segurança..."
+                      className="w-full bg-[#0A0E17] border border-slate-800 rounded-xl px-3.5 py-3 text-xs text-white"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-medium text-slate-300 mb-1.5">
+                      Empresa / MEI (Opcional)
+                    </label>
+                    <input
+                      type="text"
+                      value={myCompany}
+                      onChange={(e) => setMyCompany(e.target.value)}
+                      placeholder="Ex: Prestador Parceiro MEI"
+                      className="w-full bg-[#0A0E17] border border-slate-800 rounded-xl px-3.5 py-3 text-xs text-white"
+                    />
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-2 gap-3 bg-[#0A0E17] border border-slate-800 p-3.5 rounded-2xl text-xs">
+                  <div>
+                    <span className="text-slate-500 block">Valor da Diária Acordada</span>
+                    <span className="text-emerald-400 font-extrabold text-sm">
+                      R$ {currentUser?.dailyRate || 0} / evento
+                    </span>
+                  </div>
+                  <div>
+                    <span className="text-slate-500 block">Status do Cadastro</span>
+                    <span className="text-emerald-400 font-bold text-sm">
+                      ● {currentUser?.status || "ATIVO"}
+                    </span>
+                  </div>
+                </div>
+
+                <button
+                  type="submit"
+                  className="w-full bg-[#F59E0B] hover:bg-amber-400 text-slate-950 font-extrabold py-3.5 rounded-2xl text-xs transition"
+                >
+                  Salvar alterações no Supabase
+                </button>
+              </form>
+
+              {/* COLUNA 2: SEGURANÇA DA SENHA (RBAC) */}
+              <form
+                onSubmit={handleUpdatePassword}
+                className="xl:col-span-6 bg-[#111726] border border-slate-800/90 rounded-3xl p-6 space-y-4"
+              >
+                <div className="border-b border-slate-800 pb-4">
+                  <h2 className="text-lg font-extrabold text-white">Segurança da Senha (RBAC)</h2>
+                  <p className="text-xs text-slate-400">
+                    Mínimo de 8 caracteres, 1 caractere especial, letra maiúscula, minúscula e número.
+                  </p>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-medium text-slate-300 mb-1.5">Senha atual *</label>
+                  <input
+                    type="password"
+                    required
+                    value={currentPassword}
+                    onChange={(e) => setCurrentPassword(e.target.value)}
+                    placeholder="••••••••••••"
+                    className="w-full bg-[#0A0E17] border border-slate-800 rounded-xl px-3.5 py-3 text-xs text-white"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-medium text-slate-300 mb-1.5">Nova senha RBAC *</label>
+                  <input
+                    type="password"
+                    required
+                    value={newPassword}
+                    onChange={(e) => setNewPassword(e.target.value)}
+                    placeholder="••••••••••••••"
+                    className="w-full bg-[#0A0E17] border border-slate-800 rounded-xl px-3.5 py-3 text-xs text-white"
+                  />
+                </div>
+
+                <div className="grid grid-cols-2 gap-2 text-xs bg-[#0A0E17] border border-slate-800 p-3.5 rounded-2xl">
+                  <span className={pwCheck.minLength ? "text-emerald-400 font-bold" : "text-slate-500"}>
+                    ✓ Mínimo de 8 caracteres
+                  </span>
+                  <span className={pwCheck.hasSpecial ? "text-emerald-400 font-bold" : "text-slate-500"}>
+                    ✓ 1 caractere especial (!@#$)
+                  </span>
+                  <span className={pwCheck.hasUpper && pwCheck.hasLower ? "text-emerald-400 font-bold" : "text-slate-500"}>
+                    ✓ Maiúscula e minúscula
+                  </span>
+                  <span className={pwCheck.hasNumber ? "text-emerald-400 font-bold" : "text-slate-500"}>
+                    ✓ Pelo menos 1 número
+                  </span>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-medium text-slate-300 mb-1.5">Confirme a nova senha *</label>
+                  <input
+                    type="password"
+                    required
+                    value={confirmPassword}
+                    onChange={(e) => setConfirmPassword(e.target.value)}
+                    placeholder="••••••••••••••"
+                    className="w-full bg-[#0A0E17] border border-slate-800 rounded-xl px-3.5 py-3 text-xs text-white"
+                  />
+                </div>
+
+                <button
+                  type="submit"
+                  className="w-full bg-[#192236] hover:bg-slate-800 text-amber-400 border border-amber-500/30 font-extrabold py-3.5 rounded-2xl text-xs transition"
+                >
+                  Atualizar minha senha no Supabase
+                </button>
+              </form>
+            </div>
           )}
         </main>
       </div>
