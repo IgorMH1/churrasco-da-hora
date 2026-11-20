@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import { applyAnatelPhoneMask, validateAnatelPhone } from "../../lib/services/anatel";
 import {
   getNowGmt3,
@@ -17,6 +17,7 @@ import {
   insertBackupLogInSupabase,
   deleteBackupLogFromSupabase,
   resetDatabaseToAdminOnly,
+  generateGoogleCalendarUrl,
   getCurrentUserSession,
   setCurrentUserSession,
   DEFAULT_ADMIN_USER,
@@ -76,40 +77,6 @@ function isStaffMemberConfirmed(memberName: string, confirmedList?: string[]): b
   return confirmedList.some((c) => c.trim().toLowerCase() === cleanMember);
 }
 
-// Dispara a sincronização automática para o Google Agenda em segundo plano
-async function syncEventWithGoogleCalendarApi(ev: EventRecord): Promise<string> {
-  try {
-    const res = await fetch("/api/google-calendar", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ event: ev }),
-    });
-    const data = await res.json();
-    if (res.ok && data.googleCalendarEventId) {
-      return data.googleCalendarEventId;
-    }
-  } catch {
-    // Continua com identificador automático local caso offline
-  }
-  return ev.googleCalendarEventId || `gcal_auto_${ev.id}`;
-}
-
-// Dispara a remoção automática do evento no Google Agenda ao cancelar
-async function removeEventFromGoogleCalendarApi(ev: EventRecord): Promise<void> {
-  try {
-    await fetch("/api/google-calendar", {
-      method: "DELETE",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        eventId: ev.id,
-        googleCalendarEventId: ev.googleCalendarEventId,
-      }),
-    });
-  } catch {
-    // Silencioso caso offline
-  }
-}
-
 export default function AdminPortalPage() {
   const [activeTab, setActiveTab] = useState<AdminTab>("DASHBOARD");
   const [todayGmt3, setTodayGmt3] = useState<string>("2026-11-18");
@@ -117,6 +84,12 @@ export default function AdminPortalPage() {
   const [currentUser, setCurrentUser] = useState<UserAccount>(DEFAULT_ADMIN_USER);
   const [myPasswordDaysRemaining, setMyPasswordDaysRemaining] = useState<number>(90);
   const [feedback, setFeedback] = useState<{ type: "success" | "error"; text: string } | null>(null);
+
+  // Referência para detectar o duplo clique nos dias do calendário
+  const lastCalendarClickRef = useRef<{ date: string; time: number }>({
+    date: "",
+    time: 0,
+  });
 
   const [users, setUsers] = useState<UserAccount[]>([]);
   const [clients, setClients] = useState<ClientRecord[]>([]);
@@ -291,15 +264,12 @@ export default function AdminPortalPage() {
 
   const eventsInSelectedMonth = events.filter((e) => e.eventDate.slice(0, 7) === selectedYearMonth);
 
-  // A Agenda Ativa do Mês exclui automaticamente eventos cancelados
-  const activeEventsInSelectedMonth = eventsInSelectedMonth.filter((e) => e.status !== "CANCELADO");
-
-  const countMonthActive = activeEventsInSelectedMonth.length;
+  const countMonthAll = eventsInSelectedMonth.length;
   const countMonthPending = eventsInSelectedMonth.filter((e) => e.status === "PENDENTE").length;
   const countMonthConfirmed = eventsInSelectedMonth.filter((e) => e.status === "CONFIRMADO").length;
   const countMonthCancelled = eventsInSelectedMonth.filter((e) => e.status === "CANCELADO").length;
 
-  const countActiveAll = events.filter((e) => e.status !== "CANCELADO").length;
+  const countAll = events.length;
   const countPending = events.filter((e) => e.status === "PENDENTE").length;
   const countConfirmed = events.filter((e) => e.status === "CONFIRMADO").length;
   const countCancelled = events.filter((e) => e.status === "CANCELADO").length;
@@ -598,69 +568,41 @@ export default function AdminPortalPage() {
     });
   };
 
-  // APROVAÇÃO E ENVIO AUTOMÁTICO PARA O GOOGLE AGENDA (Sem precisar clicar em botão manual)
-  const handleApproveAndSyncGcal = async (id: string) => {
+  const handleApproveAndSyncGcal = (id: string) => {
     if (!isAdmin) return;
     const targetEv = events.find((ev) => ev.id === id);
-    if (!targetEv) return;
-
-    const provisionalGcalId =
-      targetEv.googleCalendarEventId || `gcal_auto_${targetEv.id}`;
-
-    const confirmedEv: EventRecord = {
-      ...targetEv,
-      status: "CONFIRMADO",
-      responsibleAdmin: targetEv.responsibleAdmin.includes("confirmar")
-        ? currentUser.name
-        : targetEv.responsibleAdmin,
-      googleCalendarEventId: provisionalGcalId,
-    };
-
-    const updated = events.map((ev) => (ev.id === id ? confirmedEv : ev));
-    setEvents(updated);
-    saveEventsToStorage(updated);
-
-    setSelectedYearMonth(targetEv.eventDate.slice(0, 7));
-    setEvDate(targetEv.eventDate);
-
-    const syncedGcalId = await syncEventWithGoogleCalendarApi(confirmedEv);
-    if (syncedGcalId !== provisionalGcalId) {
-      const finalUpdated = updated.map((ev) =>
-        ev.id === id ? { ...ev, googleCalendarEventId: syncedGcalId } : ev
-      );
-      setEvents(finalUpdated);
-      saveEventsToStorage(finalUpdated);
-    }
-
-    setFeedback({
-      type: "success",
-      text: `✓ Evento "${targetEv.title}" confirmado e sincronizado automaticamente no Google Agenda!`,
-    });
-  };
-
-  // CANCELAMENTO COM REMOÇÃO AUTOMÁTICA DA AGENDA ATIVA E DO GOOGLE AGENDA
-  const handleCancelEvent = async (id: string) => {
-    if (!isAdmin) return;
-    const targetEv = events.find((ev) => ev.id === id);
-    if (!targetEv) return;
-
-    await removeEventFromGoogleCalendarApi(targetEv);
-
     const updated = events.map((ev) =>
       ev.id === id
         ? {
             ...ev,
-            status: "CANCELADO" as const,
-            googleCalendarEventId: undefined,
+            status: "CONFIRMADO" as const,
+            responsibleAdmin: ev.responsibleAdmin.includes("confirmar")
+              ? currentUser.name
+              : ev.responsibleAdmin,
+            googleCalendarEventId: `gcal_auto_${Math.floor(1000 + Math.random() * 9000)}`,
           }
         : ev
     );
     setEvents(updated);
     saveEventsToStorage(updated);
+
+    if (targetEv) {
+      setSelectedYearMonth(targetEv.eventDate.slice(0, 7));
+      setEvDate(targetEv.eventDate);
+    }
+
     setFeedback({
       type: "success",
-      text: `🗑️ Evento "${targetEv.title}" cancelado e retirado automaticamente da Agenda Ativa e do Google Agenda.`,
+      text: `✓ Evento "${targetEv?.title || id}" confirmado na agenda! Use o botão "📅 GCal" para abrir no Google Calendar.`,
     });
+  };
+
+  const handleCancelEvent = (id: string) => {
+    if (!isAdmin) return;
+    const updated = events.map((ev) => (ev.id === id ? { ...ev, status: "CANCELADO" as const } : ev));
+    setEvents(updated);
+    saveEventsToStorage(updated);
+    setFeedback({ type: "success", text: "Evento marcado como Cancelado (Vermelho) e horário liberado." });
   };
 
   const openEventModal = (ev: EventRecord) => {
@@ -680,7 +622,7 @@ export default function AdminPortalPage() {
     setModNotes(ev.notes || "");
   };
 
-  const handleSaveEventModal = async (e: React.FormEvent) => {
+  const handleSaveEventModal = (e: React.FormEvent) => {
     e.preventDefault();
     if (!isAdmin || !editingEvent) return;
     if (modEnd <= modStart) {
@@ -696,9 +638,7 @@ export default function AdminPortalPage() {
       modTeam.some((m) => m.trim().toLowerCase() === c.trim().toLowerCase())
     );
 
-    let nextGcalId = editingEvent.googleCalendarEventId;
-
-    const draftEv: EventRecord = {
+    const updatedEv: EventRecord = {
       ...editingEvent,
       title: modTitle,
       eventType: modCategory || "Evento",
@@ -714,18 +654,6 @@ export default function AdminPortalPage() {
       notes: modNotes,
     };
 
-    if (modStatus === "CONFIRMADO") {
-      nextGcalId = await syncEventWithGoogleCalendarApi(draftEv);
-    } else if (modStatus === "CANCELADO") {
-      await removeEventFromGoogleCalendarApi(editingEvent);
-      nextGcalId = undefined;
-    }
-
-    const updatedEv: EventRecord = {
-      ...draftEv,
-      googleCalendarEventId: nextGcalId,
-    };
-
     const updatedList = events.map((ev) => (ev.id === editingEvent.id ? updatedEv : ev));
     setEvents(updatedList);
     saveEventsToStorage(updatedList);
@@ -733,15 +661,11 @@ export default function AdminPortalPage() {
     setEditingEvent(null);
     setFeedback({
       type: "success",
-      text:
-        modStatus === "CANCELADO"
-          ? "🗑️ Evento cancelado e removido automaticamente da agenda ativa e do Google Agenda!"
-          : "✓ Dados, escala e sincronização automática com o Google Agenda atualizados no Supabase!",
+      text: "✓ Dados, escala e confirmações da equipe atualizados na agenda e no Supabase!",
     });
   };
 
-  // CRIAÇÃO DE EVENTO PELO ADM COM ENVIO AUTOMÁTICO PARA O GOOGLE AGENDA
-  const handleCreateManualEvent = async (e: React.FormEvent) => {
+  const handleCreateManualEvent = (e: React.FormEvent) => {
     e.preventDefault();
     if (!isAdmin) return;
     if (!evCategoryText.trim()) {
@@ -773,10 +697,9 @@ export default function AdminPortalPage() {
     }
 
     const formattedGuests = evGuestCount.includes("pessoa") ? evGuestCount : `${evGuestCount} pessoas`;
-    const newId = `EV-${Math.floor(1000 + Math.random() * 9000)}`;
 
     const newEv: EventRecord = {
-      id: newId,
+      id: `EV-${Math.floor(1000 + Math.random() * 9000)}`,
       title: evTitle || `${evCategoryText} (${formattedGuests})`,
       eventType: evCategoryText.trim(),
       honoreeName: formattedGuests,
@@ -786,7 +709,7 @@ export default function AdminPortalPage() {
       startTime: evStart,
       endTime: evEnd,
       status: "CONFIRMADO",
-      googleCalendarEventId: `gcal_auto_${newId}`,
+      googleCalendarEventId: `gcal_auto_${Math.floor(1000 + Math.random() * 9000)}`,
       supportTeam: evStaffSelected.length > 0 ? evStaffSelected : ["Equipe padrão"],
       confirmedStaff: [],
     };
@@ -801,19 +724,9 @@ export default function AdminPortalPage() {
     setShowNewEventModal(false);
     setSelectedYearMonth(evDate.slice(0, 7));
     setSelectedCalendarDay(evDate);
-
-    const syncedGcalId = await syncEventWithGoogleCalendarApi(newEv);
-    if (syncedGcalId !== newEv.googleCalendarEventId) {
-      const syncedList = updated.map((ev) =>
-        ev.id === newId ? { ...ev, googleCalendarEventId: syncedGcalId } : ev
-      );
-      setEvents(syncedList);
-      saveEventsToStorage(syncedList);
-    }
-
     setFeedback({
       type: "success",
-      text: `✓ Evento "${newEv.title}" criado e sincronizado automaticamente no Google Agenda!`,
+      text: `✓ Evento "${newEv.title}" adicionado na agenda! Clique em "📅 GCal" no card para salvar no Google Calendar.`,
     });
   };
 
@@ -912,14 +825,9 @@ export default function AdminPortalPage() {
     return matchRole && matchQuery;
   });
 
-  // Na lista da agenda: o filtro padrão ("TODOS") mostra apenas eventos ATIVOS (não cancelados);
-  // Eventos cancelados só aparecem ao selecionar o histórico "CANCELADO".
   const filteredEvents = events.filter((ev) => {
     const matchesMonth = ev.eventDate.slice(0, 7) === selectedYearMonth;
-    const matchesStatus =
-      statusFilter === "TODOS"
-        ? ev.status !== "CANCELADO"
-        : ev.status === statusFilter;
+    const matchesStatus = statusFilter === "TODOS" || ev.status === statusFilter;
     const matchesDay = !selectedCalendarDay || ev.eventDate === selectedCalendarDay;
     const matchesQuery =
       !searchQuery.trim() ||
@@ -1139,11 +1047,13 @@ export default function AdminPortalPage() {
         <div className="hidden lg:flex flex-col gap-4 pt-6">
           <div className="bg-[#111726] border border-slate-800/90 rounded-2xl p-3.5 space-y-1">
             <span className="text-[11px] font-semibold text-emerald-400 flex items-center gap-1.5">
-              <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" /> ✓ Sincronização Automática
+              <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" /> ✓ Conectado
             </span>
-            <p className="text-xs font-bold text-white">Supabase & Google Agenda</p>
+            <p className="text-xs font-bold text-white">Supabase & Google Calendar</p>
             <p className="text-[11px] text-slate-400">
-              Eventos confirmados entram na agenda e cancelados saem automaticamente.
+              {isReadOnlyStaff
+                ? "Modo visualização do local + Minha conta."
+                : "Acesso total de Administrador."}
             </p>
           </div>
 
@@ -1180,7 +1090,7 @@ export default function AdminPortalPage() {
             <p className="text-[10px] font-bold tracking-[0.18em] text-amber-500 uppercase">
               {isReadOnlyStaff
                 ? "MODO SOMENTE VISUALIZAÇÃO · EQUIPE DO ESPAÇO"
-                : "ADMINISTRAÇÃO DO ESPAÇO · SUPABASE & GOOGLE AGENDA AUTOMÁTICO"}
+                : "ADMINISTRAÇÃO DO ESPAÇO · SUPABASE CLOUD"}
             </p>
             <h1 className="text-2xl sm:text-3xl font-extrabold text-white mt-0.5">
               {activeTab === "DASHBOARD" && `Dashboard — ${formatYearMonthLabel(selectedYearMonth)}`}
@@ -1196,12 +1106,12 @@ export default function AdminPortalPage() {
             <p className="text-xs text-slate-400 mt-0.5">
               {activeTab === "DASHBOARD" &&
                 (isReadOnlyStaff
-                  ? "Consulte a programação mensal ativa do espaço e confirme a sua presença nos eventos."
-                  : "Eventos confirmados vão automaticamente para o Google Agenda e eventos cancelados saem da agenda.")}
+                  ? "Consulte a programação mensal do espaço e confirme a sua presença nos eventos."
+                  : "Navegue por todos os meses do ano e acompanhe a confirmação da equipe interna e externa.")}
               {activeTab === "EVENTOS" &&
                 (isReadOnlyStaff
-                  ? "Visualização completa do calendário anual e dos detalhes de cada evento ativo."
-                  : "Dê 2 cliques (duplo clique) em qualquer dia do calendário para criar um novo evento naquela data.")}
+                  ? "Visualização completa do calendário anual e dos detalhes de cada evento."
+                  : "Dê 2 cliques (duplo clique) em qualquer dia do calendário para abrir um novo agendamento.")}
               {activeTab === "CADASTROS" &&
                 (isReadOnlyStaff
                   ? "Visualização de contatos da equipe e clientes (edição restrita ao Administrador)."
@@ -1232,8 +1142,8 @@ export default function AdminPortalPage() {
         {isReadOnlyStaff && activeTab !== "MINHA_CONTA" && (
           <div className="mx-6 mt-5 px-4 py-3 rounded-2xl bg-sky-950/40 border border-sky-500/30 text-sky-200 text-xs flex flex-wrap items-center justify-between gap-2">
             <span>
-              👁️ <strong>Modo Visualização:</strong> Você pode consultar toda a agenda ativa e os cadastros do espaço
-              e confirmar a sua presença na escala. Para alterar seus dados ou senha, acesse a aba{" "}
+              👁️ <strong>Modo Visualização:</strong> Você pode consultar toda a agenda e os cadastros do espaço e
+              confirmar a sua presença na escala. Para alterar seus dados ou senha, acesse a aba{" "}
               <strong>Minha conta</strong>.
             </span>
             <button
@@ -1276,15 +1186,15 @@ export default function AdminPortalPage() {
                   className="cursor-pointer bg-[#111726] hover:bg-[#161E31] border border-slate-800/90 rounded-2xl p-5 border-t-2 border-t-amber-500 transition"
                 >
                   <div className="flex justify-between items-center text-xs text-slate-400">
-                    <span>Agenda ativa em {formatYearMonthLabel(selectedYearMonth)}</span>
+                    <span>Eventos em {formatYearMonthLabel(selectedYearMonth)}</span>
                     <span className="text-[10px] font-bold bg-amber-500/15 text-amber-400 px-2 py-0.5 rounded">
                       {selectedYearMonth}
                     </span>
                   </div>
                   <p className="text-4xl font-extrabold text-white mt-2">
-                    {String(countMonthActive).padStart(2, "0")}
+                    {String(countMonthAll).padStart(2, "0")}
                   </p>
-                  <p className="text-xs text-amber-400/80 mt-1">Total ativos no ano: {countActiveAll} →</p>
+                  <p className="text-xs text-amber-400/80 mt-1">Total no ano: {countAll} evento(s) →</p>
                 </div>
 
                 <div
@@ -1295,7 +1205,7 @@ export default function AdminPortalPage() {
                   className="cursor-pointer bg-[#111726] hover:bg-[#161E31] border border-slate-800/90 rounded-2xl p-5 border-t-2 border-t-emerald-500 transition"
                 >
                   <div className="flex justify-between items-center text-xs text-slate-400">
-                    <span>Confirmados no Google Agenda</span>
+                    <span>Confirmados no mês (Verde)</span>
                     <span className="text-emerald-400 font-bold">✓</span>
                   </div>
                   <p className="text-4xl font-extrabold text-emerald-400 mt-2">
@@ -1329,13 +1239,13 @@ export default function AdminPortalPage() {
                   className="cursor-pointer bg-[#111726] hover:bg-[#161E31] border border-slate-800/90 rounded-2xl p-5 border-t-2 border-t-red-500 transition"
                 >
                   <div className="flex justify-between items-center text-xs text-slate-400">
-                    <span>Removidos / Cancelados</span>
+                    <span>Cancelados no mês (Vermelho)</span>
                     <span className="text-red-400 font-bold">✕</span>
                   </div>
                   <p className="text-4xl font-extrabold text-red-400 mt-2">
                     {String(countMonthCancelled).padStart(2, "0")}
                   </p>
-                  <p className="text-xs text-red-400/80 mt-1">Histórico de cancelados ({countCancelled}) →</p>
+                  <p className="text-xs text-red-400/80 mt-1">Total cancelados: {countCancelled} →</p>
                 </div>
               </div>
 
@@ -1344,29 +1254,31 @@ export default function AdminPortalPage() {
                   <div className="flex items-center justify-between">
                     <div>
                       <h2 className="text-lg font-extrabold text-white">
-                        Agenda Ativa de {formatYearMonthLabel(selectedYearMonth)}
+                        Agenda de {formatYearMonthLabel(selectedYearMonth)}
                       </h2>
                       <p className="text-xs text-slate-400">
-                        Eventos confirmados já estão no Google Agenda · Eventos cancelados são removidos automaticamente daqui
+                        {isReadOnlyStaff
+                          ? "Visualização dos eventos do mês e confirmação da sua presença"
+                          : "Veja o status de confirmação de cada membro da equipe interna e externa"}
                       </p>
                     </div>
                     <span className="text-xs bg-[#0A0E17] border border-slate-800 px-3 py-1 rounded-full text-amber-400 font-semibold">
-                      {activeEventsInSelectedMonth.length} evento(s) ativo(s)
+                      {eventsInSelectedMonth.length} evento(s) em {selectedYearMonth}
                     </span>
                   </div>
 
-                  {activeEventsInSelectedMonth.length === 0 ? (
+                  {eventsInSelectedMonth.length === 0 ? (
                     <div className="bg-[#0A0E17] border border-slate-800/80 rounded-2xl p-8 text-center space-y-2">
                       <p className="text-sm font-semibold text-slate-300">
-                        Nenhum evento ativo programado para {formatYearMonthLabel(selectedYearMonth)}.
+                        Nenhum evento programado para {formatYearMonthLabel(selectedYearMonth)}.
                       </p>
                       <p className="text-xs text-slate-500">
-                        Use o seletor de meses acima ou dê 2 cliques num dia do Calendário Mensal para agendar.
+                        Use o seletor de meses acima para consultar outros períodos do ano.
                       </p>
                     </div>
                   ) : (
                     <div className="space-y-3">
-                      {activeEventsInSelectedMonth.map((ev) => (
+                      {eventsInSelectedMonth.map((ev) => (
                         <div
                           key={ev.id}
                           onClick={() => isAdmin && openEventModal(ev)}
@@ -1388,13 +1300,12 @@ export default function AdminPortalPage() {
                                     ev.status
                                   )}`}
                                 >
-                                  {ev.status === "CONFIRMADO" ? "✓ Confirmado" : "● Pendente"}
+                                  {ev.status === "CONFIRMADO"
+                                    ? "✓ Confirmado"
+                                    : ev.status === "CANCELADO"
+                                    ? "✕ Cancelado"
+                                    : "● Pendente"}
                                 </span>
-                                {ev.status === "CONFIRMADO" && (
-                                  <span className="text-[10px] font-bold px-2.5 py-0.5 rounded-full bg-emerald-500/10 text-emerald-300 border border-emerald-500/30">
-                                    📅 Sincronizado no Google Agenda
-                                  </span>
-                                )}
                               </div>
                               <p className="text-xs text-slate-400">
                                 <span className="text-amber-400 font-semibold">{ev.eventType}</span> · Quantidade:{" "}
@@ -1417,7 +1328,7 @@ export default function AdminPortalPage() {
                                     onClick={() => handleApproveAndSyncGcal(ev.id)}
                                     className="bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-xs px-3.5 py-2 rounded-xl"
                                   >
-                                    ✓ Confirmar na Agenda
+                                    ✓ Aprovar na Agenda
                                   </button>
                                 )}
                                 <button
@@ -1426,13 +1337,23 @@ export default function AdminPortalPage() {
                                 >
                                   Editar escala
                                 </button>
-                                <button
-                                  onClick={() => handleCancelEvent(ev.id)}
-                                  className="text-xs text-red-400 hover:text-red-300 px-2 py-1"
-                                >
-                                  Cancelar e retirar da agenda
-                                </button>
                               </>
+                            )}
+                            <a
+                              href={generateGoogleCalendarUrl(ev)}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-300 border border-emerald-500/30 text-xs font-semibold px-3 py-1.5 rounded-xl text-center"
+                            >
+                              📅 GCal
+                            </a>
+                            {isAdmin && ev.status !== "CANCELADO" && (
+                              <button
+                                onClick={() => handleCancelEvent(ev.id)}
+                                className="text-xs text-red-400 hover:text-red-300 px-2 py-1"
+                              >
+                                Cancelar
+                              </button>
                             )}
                           </div>
                         </div>
@@ -1488,7 +1409,7 @@ export default function AdminPortalPage() {
             </div>
           )}
 
-          {/* ABA 2: GESTÃO DE EVENTOS COM DUPLO CLIQUE NO CALENDÁRIO MENSAL */}
+          {/* ABA 2: GESTÃO DE EVENTOS COM DUPLO CLIQUE FUNCIONAL E BOTÃO MANUAL 📅 GCal */}
           {activeTab === "EVENTOS" && (
             <div className="w-full space-y-6">
               {renderMonthNavigationBar()}
@@ -1544,12 +1465,10 @@ export default function AdminPortalPage() {
                   {Array.from({ length: daysInMonth }).map((_, idx) => {
                     const dayNum = idx + 1;
                     const fullDate = `${selectedYearMonth}-${String(dayNum).padStart(2, "0")}`;
-                    // Apenas eventos ativos (não cancelados) marcam ocupação no calendário
-                    const activeDayEvents = events.filter(
-                      (e) => e.eventDate === fullDate && e.status !== "CANCELADO"
-                    );
-                    const hasConfirmed = activeDayEvents.some((e) => e.status === "CONFIRMADO");
-                    const hasPending = activeDayEvents.some((e) => e.status === "PENDENTE");
+                    const dayEvents = events.filter((e) => e.eventDate === fullDate);
+                    const hasConfirmed = dayEvents.some((e) => e.status === "CONFIRMADO");
+                    const hasPending = dayEvents.some((e) => e.status === "PENDENTE");
+                    const hasCancelled = dayEvents.some((e) => e.status === "CANCELADO");
                     const isSelected = selectedCalendarDay === fullDate;
 
                     return (
@@ -1558,18 +1477,26 @@ export default function AdminPortalPage() {
                         type="button"
                         title={
                           isAdmin
-                            ? "Clique 1x para filtrar · Duplo clique (2x) para criar novo evento nesta data"
+                            ? "Clique 1x para filtrar · Dê 2 cliques na data para abrir um novo agendamento"
                             : "Clique para filtrar os eventos deste dia"
                         }
                         onClick={() => {
+                          const nowMs = Date.now();
+                          const isDoubleClick =
+                            lastCalendarClickRef.current.date === fullDate &&
+                            nowMs - lastCalendarClickRef.current.time < 500;
+
+                          lastCalendarClickRef.current = { date: fullDate, time: nowMs };
+
+                          if (isDoubleClick && isAdmin) {
+                            setEvDate(fullDate);
+                            setSelectedCalendarDay(fullDate);
+                            setShowNewEventModal(true);
+                            return;
+                          }
+
                           setEvDate(fullDate);
                           setSelectedCalendarDay(isSelected ? null : fullDate);
-                        }}
-                        onDoubleClick={() => {
-                          if (!isAdmin) return;
-                          setEvDate(fullDate);
-                          setSelectedCalendarDay(fullDate);
-                          setShowNewEventModal(true);
                         }}
                         className={`h-14 rounded-2xl border text-xs font-bold flex flex-col items-center justify-center transition select-none ${
                           isSelected
@@ -1578,10 +1505,11 @@ export default function AdminPortalPage() {
                         }`}
                       >
                         <span>{dayNum}</span>
-                        {activeDayEvents.length > 0 && (
+                        {dayEvents.length > 0 && (
                           <div className="flex items-center gap-1 mt-1">
                             {hasConfirmed && <span className="w-2 h-2 rounded-full bg-emerald-400" />}
                             {hasPending && <span className="w-2 h-2 rounded-full bg-orange-400" />}
+                            {hasCancelled && <span className="w-2 h-2 rounded-full bg-red-500" />}
                           </div>
                         )}
                       </button>
@@ -1601,7 +1529,7 @@ export default function AdminPortalPage() {
                           : "text-slate-400 hover:text-white"
                       }`}
                     >
-                      Agenda Ativa ({countMonthActive})
+                      Todos no mês ({countMonthAll})
                     </button>
                     <button
                       onClick={() => setStatusFilter("PENDENTE")}
@@ -1631,7 +1559,7 @@ export default function AdminPortalPage() {
                           : "text-red-400 hover:bg-red-500/10"
                       }`}
                     >
-                      ✕ Cancelados / Removidos ({countMonthCancelled})
+                      ✕ Cancelados ({countMonthCancelled})
                     </button>
                   </div>
 
@@ -1669,21 +1597,16 @@ export default function AdminPortalPage() {
                               {ev.status === "CONFIRMADO"
                                 ? "✓ Confirmado"
                                 : ev.status === "CANCELADO"
-                                ? "✕ Cancelado (Removido da Agenda)"
+                                ? "✕ Cancelado"
                                 : "● Pendente"}
                             </span>
-                            {ev.status === "CONFIRMADO" && (
-                              <span className="text-[10px] font-bold px-2.5 py-0.5 rounded-full bg-emerald-500/10 text-emerald-300 border border-emerald-500/30">
-                                📅 Sincronizado no Google Agenda
-                              </span>
-                            )}
                           </div>
                           <p className="text-xs text-slate-300">
                             📅 <strong>{ev.eventDate}</strong> ({ev.startTime} - {ev.endTime}) · 👥 Quantidade:{" "}
                             <strong>{ev.honoreeName}</strong> · Cliente: {ev.clientName} · ADM: {ev.responsibleAdmin}
                           </p>
 
-                          {ev.status !== "CANCELADO" && renderStaffConfirmationBadges(ev)}
+                          {renderStaffConfirmationBadges(ev)}
                         </div>
 
                         <div className="flex flex-wrap items-center gap-2 shrink-0">
@@ -1703,6 +1626,14 @@ export default function AdminPortalPage() {
                               ✏️ Editar dados & Escala
                             </button>
                           )}
+                          <a
+                            href={generateGoogleCalendarUrl(ev)}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-300 border border-emerald-500/30 text-xs font-semibold px-3 py-2 rounded-xl"
+                          >
+                            📅 GCal
+                          </a>
                           {isAdmin && ev.status !== "CANCELADO" && (
                             <button
                               onClick={() => handleCancelEvent(ev.id)}
@@ -2280,7 +2211,7 @@ export default function AdminPortalPage() {
         </main>
       </div>
 
-      {/* MODAL DE "NOVO AGENDAMENTO RÁPIDO" (ABERTO PELO BOTÃO DO TOPO OU POR DUPLO CLIQUE NO CALENDÁRIO) */}
+      {/* MODAL DE "NOVO AGENDAMENTO RÁPIDO" */}
       {isAdmin && showNewEventModal && (
         <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-sm flex items-center justify-center p-4">
           <form
@@ -2289,8 +2220,8 @@ export default function AdminPortalPage() {
           >
             <div className="flex items-center justify-between border-b border-slate-800 pb-3">
               <div>
-                <span className="text-[10px] font-bold uppercase text-emerald-400">
-                  SINCRONIZAÇÃO AUTOMÁTICA COM GOOGLE AGENDA · DATA: {evDate}
+                <span className="text-[10px] font-bold uppercase text-amber-400">
+                  ADICIONAR AUTOMATICAMENTE NA AGENDA · DATA: {evDate}
                 </span>
                 <h2 className="text-lg font-extrabold text-white mt-0.5">+ Novo agendamento rápido</h2>
               </div>
@@ -2431,7 +2362,7 @@ export default function AdminPortalPage() {
                 type="submit"
                 className="flex-1 bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-extrabold py-3 rounded-xl transition"
               >
-                ✓ Confirmar e enviar automaticamente ao Google Agenda
+                ✓ Confirmar e colocar na agenda
               </button>
               <button
                 type="button"
@@ -2568,7 +2499,7 @@ export default function AdminPortalPage() {
             <div className="flex items-center justify-between border-b border-slate-800 pb-3">
               <div>
                 <span className="text-[10px] font-bold uppercase text-amber-400">
-                  GESTÃO DE ESCALA E SINCRONIZAÇÃO AUTOMÁTICA GOOGLE AGENDA
+                  GESTÃO DE ESCALA E CONFIRMAÇÃO DE PRESENÇA
                 </span>
                 <h3 className="text-lg font-extrabold text-white mt-0.5">Editar Evento & Escala</h3>
               </div>
@@ -2613,15 +2544,15 @@ export default function AdminPortalPage() {
                 />
               </div>
               <div>
-                <label className="block text-slate-300 mb-1">Status (Sincroniza / Remove da Agenda)</label>
+                <label className="block text-slate-300 mb-1">Status (Verde / Laranja / Vermelho)</label>
                 <select
                   value={modStatus}
                   onChange={(e) => setModStatus(e.target.value as EventRecord["status"])}
                   className="w-full bg-[#0A0E17] border border-slate-800 rounded-xl px-3 py-2 text-white"
                 >
-                  <option value="CONFIRMADO">🟢 Confirmado (Sincroniza no Google Agenda)</option>
-                  <option value="PENDENTE">🟠 Pendente (Aguardando)</option>
-                  <option value="CANCELADO">🔴 Cancelado (Remove da Agenda)</option>
+                  <option value="CONFIRMADO">🟢 Confirmado (Verde)</option>
+                  <option value="PENDENTE">🟠 Pendente (Laranja)</option>
+                  <option value="CANCELADO">🔴 Cancelado (Vermelho)</option>
                 </select>
               </div>
             </div>
@@ -2736,7 +2667,7 @@ export default function AdminPortalPage() {
                 type="submit"
                 className="flex-1 bg-[#F59E0B] hover:bg-amber-400 text-slate-950 font-bold py-3 rounded-xl"
               >
-                Guardar alterações e sincronizar agenda
+                Guardar alterações e confirmações
               </button>
               <button
                 type="button"
