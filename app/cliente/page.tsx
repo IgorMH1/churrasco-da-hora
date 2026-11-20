@@ -16,6 +16,7 @@ import {
   saveClientsToStorage,
   getCurrentUserSession,
   setCurrentUserSession,
+  generateGoogleCalendarUrl,
   EventRecord,
   UserAccount,
   ClientRecord,
@@ -26,7 +27,6 @@ export default function ClientPortalPage() {
   const [feedback, setFeedback] = useState<{ type: "success" | "error"; text: string } | null>(null);
   const [daysRemaining, setDaysRemaining] = useState<number>(90);
   const [isLoadingCloud, setIsLoadingCloud] = useState<boolean>(true);
-  const [showCancelledHistory, setShowCancelledHistory] = useState<boolean>(false);
 
   const [currentUser, setCurrentUser] = useState<UserAccount | null>(null);
   const [allUsers, setAllUsers] = useState<UserAccount[]>([]);
@@ -101,7 +101,7 @@ export default function ClientPortalPage() {
   const phoneCheck = validateAnatelPhone(myPhone);
   const pwCheck = validatePasswordRbac(newPassword);
 
-  const allMyEvents = allEvents.filter((ev) => {
+  const myEvents = allEvents.filter((ev) => {
     if (!currentUser) return false;
     if (currentUser.role === "ADM") return true;
     return (
@@ -110,11 +110,6 @@ export default function ClientPortalPage() {
     );
   });
 
-  // Eventos cancelados saem automaticamente da lista ativa da agenda do cliente
-  const activeMyEvents = allMyEvents.filter((ev) => ev.status !== "CANCELADO");
-  const cancelledMyEvents = allMyEvents.filter((ev) => ev.status === "CANCELADO");
-  const displayedEvents = showCancelledHistory ? cancelledMyEvents : activeMyEvents;
-
   const conflict = allEvents.find(
     (ev) =>
       ev.eventDate === eventDate &&
@@ -122,7 +117,7 @@ export default function ClientPortalPage() {
       hasScheduleConflict(startTime, endTime, ev.startTime, ev.endTime, 60)
   );
 
-  const nextEvent = activeMyEvents[0] || null;
+  const nextEvent = myEvents.find((e) => e.status !== "CANCELADO") || null;
 
   const getInitials = (name: string) => {
     if (!name) return "CL";
@@ -181,10 +176,9 @@ export default function ClientPortalPage() {
     setAllEvents(updated);
     saveEventsToStorage(updated);
     setTitle("");
-    setShowCancelledHistory(false);
     setFeedback({
       type: "success",
-      text: "✓ Solicitação salva no Supabase! Assim que confirmada pelo ADM, ela entrará automaticamente no Google Agenda.",
+      text: "✓ Solicitação salva no Supabase! Clique no card do evento ao lado para ver detalhes ou adicionar ao Google Calendar.",
     });
   };
 
@@ -199,7 +193,7 @@ export default function ClientPortalPage() {
     setEditEnd(ev.endTime);
   };
 
-  const handleSaveEventEdit = async (e: React.FormEvent) => {
+  const handleSaveEventEdit = (e: React.FormEvent) => {
     e.preventDefault();
     if (!selectedEvent) return;
 
@@ -238,56 +232,22 @@ export default function ClientPortalPage() {
       endTime: editEnd,
     };
 
-    if (updatedEv.status === "CONFIRMADO") {
-      try {
-        await fetch("/api/google-calendar", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ event: updatedEv }),
-        });
-      } catch {
-        // Continua normalmente caso offline
-      }
-    }
-
     const updatedList = allEvents.map((ev) => (ev.id === selectedEvent.id ? updatedEv : ev));
     setAllEvents(updatedList);
     saveEventsToStorage(updatedList);
     setSelectedEvent(updatedEv);
     setIsEditingEvent(false);
-    setFeedback({ type: "success", text: "✓ Dados do evento atualizados e sincronizados no Supabase!" });
+    setFeedback({ type: "success", text: "✓ Dados do evento atualizados no Supabase!" });
   };
 
-  // Cancelar evento retira automaticamente da agenda ativa e remove do Google Agenda
-  const handleCancelEventFromModal = async (id: string) => {
-    const targetEv = allEvents.find((ev) => ev.id === id);
-    if (targetEv) {
-      try {
-        await fetch("/api/google-calendar", {
-          method: "DELETE",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            eventId: targetEv.id,
-            googleCalendarEventId: targetEv.googleCalendarEventId,
-          }),
-        });
-      } catch {
-        // Silencioso caso offline
-      }
-    }
-
+  const handleCancelEventFromModal = (id: string) => {
     const updatedList = allEvents.map((ev) =>
-      ev.id === id
-        ? { ...ev, status: "CANCELADO" as const, googleCalendarEventId: undefined }
-        : ev
+      ev.id === id ? { ...ev, status: "CANCELADO" as const } : ev
     );
     setAllEvents(updatedList);
     saveEventsToStorage(updatedList);
-    setSelectedEvent(null);
-    setFeedback({
-      type: "success",
-      text: "🗑️ Evento cancelado e retirado automaticamente da sua Agenda Ativa e do Google Agenda.",
-    });
+    setSelectedEvent((prev) => (prev ? { ...prev, status: "CANCELADO" } : null));
+    setFeedback({ type: "success", text: "Solicitação de evento cancelada no Supabase." });
   };
 
   const handleSaveProfile = (e: React.FormEvent) => {
@@ -431,12 +391,10 @@ export default function ClientPortalPage() {
           <div className="bg-[#111726] border border-slate-800/90 rounded-2xl p-3.5 space-y-1">
             <span className="text-[11px] font-semibold text-emerald-400 flex items-center gap-1.5">
               <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />{" "}
-              {isLoadingCloud ? "Sincronizando..." : "✓ Supabase & Google Agenda"}
+              {isLoadingCloud ? "Sincronizando..." : "✓ Supabase & Google Calendar"}
             </span>
-            <p className="text-xs font-bold text-white">Sincronização Automática</p>
-            <p className="text-[11px] text-slate-400">
-              Eventos confirmados entram automaticamente no Google Agenda.
-            </p>
+            <p className="text-xs font-bold text-white">Nuvem Ativa</p>
+            <p className="text-[11px] text-slate-400">Seus eventos ficam salvos no banco externo.</p>
           </div>
 
           <div className="border-t border-slate-800/80 pt-4 space-y-3">
@@ -481,7 +439,7 @@ export default function ClientPortalPage() {
             </h1>
             <p className="text-xs text-slate-400 mt-0.5">
               {activeTab === "MEUS_EVENTOS"
-                ? "Eventos confirmados são enviados automaticamente ao Google Agenda · Cancelados saem da agenda."
+                ? "Legenda de status: Confirmado (Verde) · Pendente (Laranja) · Cancelado (Vermelho)"
                 : "Seus dados atualizados e sincronizados no Supabase."}
             </p>
           </div>
@@ -530,8 +488,10 @@ export default function ClientPortalPage() {
                         )}`}
                       >
                         {nextEvent.status === "CONFIRMADO"
-                          ? "● Confirmado · Sincronizado no Google Agenda"
-                          : "● Pendente (Aguardando confirmação do ADM)"}
+                          ? "● Confirmado (Verde)"
+                          : nextEvent.status === "CANCELADO"
+                          ? "● Cancelado (Vermelho)"
+                          : "● Pendente (Laranja)"}
                       </span>
                       <h2 className="text-xl font-extrabold text-white">{nextEvent.title}</h2>
                       <p className="text-xs text-slate-300">
@@ -648,79 +608,38 @@ export default function ClientPortalPage() {
                 </form>
 
                 <div className="xl:col-span-6 bg-[#111726] border border-slate-800/90 rounded-3xl p-6 space-y-4">
-                  <div className="flex flex-wrap justify-between items-center gap-2">
+                  <div className="flex justify-between items-center">
                     <div>
-                      <h2 className="text-lg font-extrabold text-white">
-                        {showCancelledHistory ? "Histórico de eventos cancelados" : "Minha agenda ativa"}
-                      </h2>
-                      <p className="text-[11px] text-slate-400">
-                        {showCancelledHistory
-                          ? "Eventos cancelados e já retirados da agenda ativa"
-                          : "Clique em um evento para editar ou cancelar"}
-                      </p>
+                      <h2 className="text-lg font-extrabold text-white">Meus eventos marcados</h2>
+                      <p className="text-[11px] text-slate-400">Clique em um evento para abrir as opções</p>
                     </div>
-
-                    <div className="flex items-center gap-2">
-                      <button
-                        type="button"
-                        onClick={() => setShowCancelledHistory(false)}
-                        className={`px-3 py-1.5 rounded-xl text-xs font-bold transition ${
-                          !showCancelledHistory
-                            ? "bg-[#F59E0B] text-slate-950"
-                            : "bg-[#0A0E17] text-slate-400 border border-slate-800"
-                        }`}
-                      >
-                        Ativos ({activeMyEvents.length})
-                      </button>
-                      {cancelledMyEvents.length > 0 && (
-                        <button
-                          type="button"
-                          onClick={() => setShowCancelledHistory(true)}
-                          className={`px-3 py-1.5 rounded-xl text-xs font-bold transition ${
-                            showCancelledHistory
-                              ? "bg-red-500 text-white"
-                              : "bg-[#0A0E17] text-red-400 border border-slate-800"
-                          }`}
-                        >
-                          Cancelados ({cancelledMyEvents.length})
-                        </button>
-                      )}
-                    </div>
+                    <span className="text-xs text-slate-400">{myEvents.length} evento(s)</span>
                   </div>
 
-                  {displayedEvents.length === 0 ? (
+                  {myEvents.length === 0 ? (
                     <p className="text-xs text-slate-500 py-8 text-center">
-                      {showCancelledHistory
-                        ? "Nenhum evento cancelado."
-                        : "Você não possui eventos ativos na agenda. Use o formulário ao lado para reservar!"}
+                      Você ainda não possui eventos marcados no Supabase. Use o formulário ao lado para reservar!
                     </p>
                   ) : (
                     <div className="space-y-3">
-                      {displayedEvents.map((ev) => (
+                      {myEvents.map((ev) => (
                         <div
                           key={ev.id}
                           onClick={() => handleOpenEventModal(ev)}
                           className="cursor-pointer bg-[#0A0E17] hover:bg-[#131B2E] border border-slate-800 hover:border-amber-500/50 rounded-2xl p-4 space-y-2 transition group"
                         >
                           <div className="flex items-center justify-between">
-                            <div className="flex flex-wrap items-center gap-2">
-                              <span
-                                className={`inline-block text-[10px] font-bold px-2.5 py-0.5 rounded-full ${getStatusBadgeClasses(
-                                  ev.status
-                                )}`}
-                              >
-                                {ev.status === "CONFIRMADO"
-                                  ? "✓ Confirmado"
-                                  : ev.status === "CANCELADO"
-                                  ? "✕ Cancelado (Fora da agenda)"
-                                  : "● Pendente"}
-                              </span>
-                              {ev.status === "CONFIRMADO" && (
-                                <span className="text-[10px] font-bold px-2.5 py-0.5 rounded-full bg-emerald-500/10 text-emerald-300 border border-emerald-500/30">
-                                  📅 Sincronizado no Google Agenda
-                                </span>
-                              )}
-                            </div>
+                            <span
+                              className={`inline-block text-[10px] font-bold px-2.5 py-0.5 rounded-full ${getStatusBadgeClasses(
+                                ev.status
+                              )}`}
+                            >
+                              {ev.status === "CONFIRMADO"
+                                ? "✓ Confirmado"
+                                : ev.status === "CANCELADO"
+                                ? "✕ Cancelado"
+                                : "● Pendente"}
+                            </span>
                             <span className="text-[11px] text-amber-400 opacity-80 group-hover:opacity-100 font-semibold">
                               Abrir detalhes →
                             </span>
@@ -941,40 +860,35 @@ export default function ClientPortalPage() {
                   <p className="font-semibold text-slate-200">{selectedEvent.supportTeam.join(", ")}</p>
                 </div>
 
-                <div className="px-4 py-3 rounded-2xl bg-[#0A0E17] border border-slate-800 text-xs">
-                  {selectedEvent.status === "CONFIRMADO" ? (
-                    <span className="text-emerald-400 font-bold">
-                      📅 ✓ Sincronizado automaticamente com o Google Agenda
-                    </span>
-                  ) : selectedEvent.status === "PENDENTE" ? (
-                    <span className="text-orange-400 font-semibold">
-                      ⏳ Será enviado automaticamente ao Google Agenda assim que confirmado pelo ADM
-                    </span>
-                  ) : (
-                    <span className="text-red-400 font-semibold">
-                      🗑️ Evento cancelado e removido da agenda ativa
-                    </span>
+                <div className="flex flex-wrap gap-2.5 pt-2">
+                  <a
+                    href={generateGoogleCalendarUrl(selectedEvent)}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="flex-1 bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold py-3 px-4 rounded-xl text-center transition"
+                  >
+                    📅 Adicionar ao Google Calendar
+                  </a>
+
+                  {selectedEvent.status !== "CANCELADO" && (
+                    <>
+                      <button
+                        type="button"
+                        onClick={() => setIsEditingEvent(true)}
+                        className="bg-[#192236] hover:bg-slate-800 text-amber-400 border border-amber-500/30 font-bold py-3 px-4 rounded-xl transition"
+                      >
+                        ✏️ Editar
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleCancelEventFromModal(selectedEvent.id)}
+                        className="bg-red-950/70 hover:bg-red-900 text-red-200 border border-red-800 font-bold py-3 px-4 rounded-xl transition"
+                      >
+                        Cancelar reserva
+                      </button>
+                    </>
                   )}
                 </div>
-
-                {selectedEvent.status !== "CANCELADO" && (
-                  <div className="flex flex-wrap gap-2.5 pt-2">
-                    <button
-                      type="button"
-                      onClick={() => setIsEditingEvent(true)}
-                      className="flex-1 bg-[#192236] hover:bg-slate-800 text-amber-400 border border-amber-500/30 font-bold py-3 px-4 rounded-xl transition"
-                    >
-                      ✏️ Editar dados da reserva
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => handleCancelEventFromModal(selectedEvent.id)}
-                      className="flex-1 bg-red-950/70 hover:bg-red-900 text-red-200 border border-red-800 font-bold py-3 px-4 rounded-xl transition"
-                    >
-                      Cancelar e retirar da agenda
-                    </button>
-                  </div>
-                )}
               </div>
             ) : (
               <form onSubmit={handleSaveEventEdit} className="space-y-3.5 text-xs">
