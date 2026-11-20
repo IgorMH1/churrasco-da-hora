@@ -2,10 +2,6 @@
 import { NextResponse } from "next/server";
 import nodemailer from "nodemailer";
 
-// Garante execução em Node.js puro na Netlify (evita falha de socket TLS no Edge Runtime)
-export const runtime = "nodejs";
-export const dynamic = "force-dynamic";
-
 export async function POST(request: Request) {
   try {
     const { email, userName, resetUrl } = await request.json();
@@ -33,13 +29,12 @@ export async function POST(request: Request) {
       return NextResponse.json(
         {
           error:
-            "Credenciais SMTP ausentes. Cadastre GMAIL_USER e GMAIL_APP_PASSWORD em Environment Variables na Netlify (ou no .env.local).",
+            "Credenciais SMTP ausentes. Cadastre GMAIL_USER e GMAIL_APP_PASSWORD nas variáveis de ambiente do servidor (ou no .env.local).",
         },
         { status: 500 }
       );
     }
 
-    // Configuração explícita na porta 465 (SSL) compatível com AWS Lambda / Netlify Functions
     const transporter = nodemailer.createTransport({
       host: "smtp.gmail.com",
       port: 465,
@@ -107,7 +102,7 @@ export async function POST(request: Request) {
     return NextResponse.json({ ok: true });
   } catch (err: unknown) {
     const message =
-      err instanceof Error ? err.message : "Falha ao enviar e-mail via Gmail SMTP na Netlify.";
+      err instanceof Error ? err.message : "Falha ao enviar e-mail via Gmail SMTP.";
     console.error("Erro SMTP Recover Password:", message);
     return NextResponse.json({ error: message }, { status: 500 });
   }
