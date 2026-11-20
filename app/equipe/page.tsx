@@ -10,6 +10,7 @@ import {
   saveStaffToStorage,
   getCurrentUserSession,
   setCurrentUserSession,
+  generateGoogleCalendarUrl,
   UserAccount,
   EventRecord,
   StaffMember,
@@ -85,7 +86,6 @@ export default function StaffPortalPage() {
     return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase();
   };
 
-  // Eventos cancelados são removidos automaticamente da escala ativa
   const assignedEvents = events.filter((ev) => {
     if (ev.status === "CANCELADO") return false;
     if (isInternal) return true;
@@ -110,7 +110,6 @@ export default function StaffPortalPage() {
     });
   };
 
-  // Salvar Dados Pessoais e Profissionais (Coluna 1)
   const handleSaveProfileData = (e: React.FormEvent) => {
     e.preventDefault();
     if (!currentUser) return;
@@ -169,7 +168,6 @@ export default function StaffPortalPage() {
     });
   };
 
-  // Atualizar Senha RBAC (Coluna 2)
   const handleUpdatePassword = (e: React.FormEvent) => {
     e.preventDefault();
     if (!currentUser) return;
@@ -272,10 +270,10 @@ export default function StaffPortalPage() {
           <div className="bg-[#111726] border border-slate-800/90 rounded-2xl p-3.5 space-y-1">
             <span className="text-[11px] font-semibold text-emerald-400 flex items-center gap-1.5">
               <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />{" "}
-              {isLoadingCloud ? "Sincronizando..." : "✓ Supabase & Google Agenda"}
+              {isLoadingCloud ? "Sincronizando..." : "✓ Supabase & Google Calendar"}
             </span>
-            <p className="text-xs font-bold text-white">Escala Sincronizada</p>
-            <p className="text-[11px] text-slate-400">Eventos cancelados saem automaticamente da sua escala.</p>
+            <p className="text-xs font-bold text-white">Nuvem Ativa</p>
+            <p className="text-[11px] text-slate-400">Use o botão 📅 GCal para adicionar eventos à sua agenda.</p>
           </div>
 
           <div className="border-t border-slate-800/80 pt-4 space-y-3">
@@ -320,7 +318,7 @@ export default function StaffPortalPage() {
             </h1>
             <p className="text-xs text-slate-400 mt-0.5">
               {activeTab === "ESCALA"
-                ? "Confira os eventos ativos na sua escala e confirme a sua presença."
+                ? "Confira os eventos na sua escala, confirme presença ou adicione ao Google Calendar."
                 : "Gerencie seus dados pessoais, informações profissionais, telefone ANATEL e senha RBAC no Supabase."}
             </p>
           </div>
@@ -353,17 +351,17 @@ export default function StaffPortalPage() {
                     {isInternal ? "Cronograma de Operação e Preparação (+1h limpeza)" : "Meus Eventos Escalados"}
                   </h2>
                   <p className="text-xs text-slate-400">
-                    Eventos confirmados são sincronizados automaticamente com o Google Agenda.
+                    Confirme sua presença ou clique em 📅 GCal para salvar o evento no seu Google Calendar.
                   </p>
                 </div>
                 <span className="text-xs bg-[#0A0E17] border border-slate-800 px-3 py-1 rounded-full text-amber-400 font-semibold">
-                  {assignedEvents.length} evento(s) ativo(s)
+                  {assignedEvents.length} evento(s)
                 </span>
               </div>
 
               {assignedEvents.length === 0 ? (
                 <p className="text-xs text-slate-500 py-8 text-center">
-                  Nenhum evento ativo escalado para o seu perfil no momento.
+                  Nenhum evento escalado para o seu perfil no momento.
                 </p>
               ) : (
                 <div className="space-y-3">
@@ -386,9 +384,7 @@ export default function StaffPortalPage() {
                                   : "bg-orange-500/15 text-orange-400 border-orange-500/40"
                               }`}
                             >
-                              {ev.status === "CONFIRMADO"
-                                ? "✓ Confirmado · No Google Agenda"
-                                : "● Pendente de aprovação"}
+                              {ev.status === "CONFIRMADO" ? "✓ Confirmado" : "● Pendente"}
                             </span>
                           </div>
                           <h3 className="font-bold text-sm text-white">{ev.title}</h3>
@@ -405,7 +401,7 @@ export default function StaffPortalPage() {
                         <div className="flex items-center gap-2 shrink-0">
                           <button
                             onClick={() => handleConfirmPresence(ev.id)}
-                            className={`px-4 py-2.5 rounded-xl text-xs font-bold transition ${
+                            className={`px-3.5 py-2 rounded-xl text-xs font-bold transition ${
                               isConfirmed
                                 ? "bg-emerald-500/20 text-emerald-300 border border-emerald-500/40"
                                 : "bg-[#F59E0B] hover:bg-amber-400 text-slate-950"
@@ -413,6 +409,14 @@ export default function StaffPortalPage() {
                           >
                             {isConfirmed ? "✓ Presença Confirmada" : "Confirmar Presença"}
                           </button>
+                          <a
+                            href={generateGoogleCalendarUrl(ev)}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="bg-slate-800 hover:bg-slate-700 text-slate-200 px-3 py-2 rounded-xl text-xs font-semibold transition"
+                          >
+                            📅 GCal
+                          </a>
                         </div>
                       </div>
                     );
@@ -421,7 +425,7 @@ export default function StaffPortalPage() {
               )}
             </div>
           ) : (
-            /* ABA "MINHA CONTA" PADRONIZADA EM 2 COLUNAS (IDÊNTICA AOS PORTAIS DO CLIENTE E ADM) */
+            /* ABA "MINHA CONTA" PADRONIZADA EM 2 COLUNAS */
             <div className="grid grid-cols-1 xl:grid-cols-12 gap-6 items-start">
               {/* COLUNA 1: MEUS DADOS PESSOAIS E PROFISSIONAIS */}
               <form
