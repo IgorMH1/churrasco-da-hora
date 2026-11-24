@@ -1,1195 +1,222 @@
+// app/page.tsx
 "use client";
 
-import React, { useState, useEffect } from "react";
-import { applyAnatelPhoneMask, validateAnatelPhone } from "../lib/services/anatel";
+import React, { useCallback, useEffect, useState } from "react";
+import { ApiHealthMonitorModal } from "../components/modals/ApiHealthMonitorModal";
 import {
-  validatePasswordRbac,
-  getNowGmt3,
-  getPasswordDaysRemaining,
-  hasScheduleConflict,
-  MAX_LOGIN_ATTEMPTS,
-  LOCKOUT_MINUTES,
-} from "../lib/services/rbacAndTime";
-import {
-  fetchAllFromSupabase,
-  saveUsersToStorage,
-  saveEventsToStorage,
-  setCurrentUserSession,
-  lockUserAccountByEmailInSupabase,
-  isFirstLoginPasswordChangeRequired,
-  markIsoPasswordChanged,
-  markIsoForFirstLogin,
-  getCorporateIdentityInfo,
-  getEmergencyMaintenanceState,
-  UserAccount,
-  EventRecord,
-} from "../lib/services/storage";
+  ApiHealthStatus,
+  EmergencyMaintenanceState,
+} from "../models/governance.model";
+import { EventRecord } from "../models/event.model";
+import { UserAccount } from "../models/user.model";
+import { getEmergencyMaintenanceState } from "../repositories/governance.repository";
+import { fetchAllFromSupabase } from "../repositories/user.repository";
+import { checkAllApisHealth } from "../services/governance.service";
+import { FirstAccessPasswordTab } from "../tabs/auth/FirstAccessPasswordTab";
+import { ForgotPasswordTab } from "../tabs/auth/ForgotPasswordTab";
+import { LoginTab } from "../tabs/auth/LoginTab";
+import { PublicPreScheduleTab } from "../tabs/auth/PublicPreScheduleTab";
+import { ResetPasswordFromLinkTab } from "../tabs/auth/ResetPasswordFromLinkTab";
 
-type ActiveTab =
+type PublicPortalTabId =
   | "LOGIN"
-  | "ESQUECI_SENHA"
-  | "TROCAR_SENHA"
   | "PRIMEIRO_ACESSO"
+  | "ESQUECI_SENHA"
+  | "TROCAR_SENHA_LINK"
   | "AGENDE_EVENTO";
 
-function createResetToken(email: string): string {
-  const payload = {
-    e: email.trim().toLowerCase(),
-    exp: Date.now() + 15 * 60 * 1000,
-  };
-  return btoa(JSON.stringify(payload));
-}
+export default function PublicAuthPortalOrchestrator() {
+  const [activeTab, setActiveTab] = useState<PublicPortalTabId>("LOGIN");
+  const [users, setUsers] = useState<UserAccount[]>([]);
+  const [events, setEvents] = useState<EventRecord[]>([]);
+  const [emergencyState, setEmergencyState] =
+    useState<EmergencyMaintenanceState>({
+      active: false,
+      lockedUserIds: [],
+    });
 
-function verifyResetToken(token: string, email: string): { valid: boolean; reason?: string } {
-  try {
-    const decoded = JSON.parse(atob(token)) as { e: string; exp: number };
-    if (!decoded || decoded.e !== email.trim().toLowerCase()) {
-      return { valid: false, reason: "O link de recuperação não corresponde a este e-mail." };
-    }
-    if (Date.now() > decoded.exp) {
-      return { valid: false, reason: "Este link expirou (limite de 15 minutos). Solicite um novo link." };
-    }
-    return { valid: true };
-  } catch {
-    return { valid: false, reason: "Link de recuperação inválido ou corrompido." };
-  }
-}
+  const [firstAccessUser, setFirstAccessUser] = useState<UserAccount | null>(
+    null
+  );
+  const [resetEmailParam, setResetEmailParam] = useState("");
+  const [resetTokenParam, setResetTokenParam] = useState("");
 
-export default function LoginAndPublicPortal() {
-  const [activeTab, setActiveTab] = useState<ActiveTab>("LOGIN");
-  const [isLoadingCloud, setIsLoadingCloud] = useState<boolean>(true);
-  const [isEmergencyActive, setIsEmergencyActive] = useState<boolean>(false);
+  const [isApiModalOpen, setIsApiModalOpen] = useState(false);
+  const [isCheckingApis, setIsCheckingApis] = useState(false);
+  const [apiStatuses, setApiStatuses] = useState<ApiHealthStatus[]>([]);
 
-  const [allUsers, setAllUsers] = useState<UserAccount[]>([]);
-  const [allEvents, setAllEvents] = useState<EventRecord[]>([]);
-
-  // Estados do Login
-  const [email, setEmail] = useState("");
-  const [password, setPassword] = useState("");
-  const [showPassword, setShowPassword] = useState(false);
-  const [failedAttempts, setFailedAttempts] = useState(0);
-  const [lockedUntil, setLockedUntil] = useState<number | null>(null);
-  const [loginFeedback, setLoginFeedback] = useState<{
-    type: "error" | "success" | "warn";
-    text: string;
-  } | null>(null);
-
-  // CARD #42: Estados da Troca Obrigatória de Senha no 1º Login (Todos os Perfis)
-  const [firstAccessUser, setFirstAccessUser] = useState<UserAccount | null>(null);
-  const [firstAccessNewPassword, setFirstAccessNewPassword] = useState("");
-  const [firstAccessConfirmPassword, setFirstAccessConfirmPassword] = useState("");
-  const [showFirstAccessPassword, setShowFirstAccessPassword] = useState(false);
-  const [firstAccessFeedback, setFirstAccessFeedback] = useState<{
-    type: "error" | "success";
-    text: string;
-  } | null>(null);
-
-  // Estados do "Esqueci minha senha" (Disparo de e-mail via Netlify / Gmail)
-  const [recoveryEmail, setRecoveryEmail] = useState("");
-  const [isSendingEmail, setIsSendingEmail] = useState(false);
-  const [recoveryFeedback, setRecoveryFeedback] = useState<{
-    type: "error" | "success";
-    text: string;
-  } | null>(null);
-
-  // Estados da Aba Exclusiva "TROCAR_SENHA" (Aberta via link do Gmail)
-  const [linkEmail, setLinkEmail] = useState("");
-  const [linkToken, setLinkToken] = useState("");
-  const [newResetPassword, setNewResetPassword] = useState("");
-  const [confirmResetPassword, setConfirmResetPassword] = useState("");
-  const [showResetPassword, setShowResetPassword] = useState(false);
-  const [resetTabFeedback, setResetTabFeedback] = useState<{
-    type: "error" | "success";
-    text: string;
-  } | null>(null);
-
-  // Estados do "Agende seu evento"
-  const [clientName, setClientName] = useState("");
-  const [clientEmail, setClientEmail] = useState("");
-  const [clientPhone, setClientPhone] = useState("");
-  const [clientPassword, setClientPassword] = useState("");
-  const [showClientPassword, setShowClientPassword] = useState(false);
-  const [eventTitle, setEventTitle] = useState("");
-  const [eventType, setEventType] = useState<string>("Aniversário");
-  const [guestCount, setGuestCount] = useState<string>("30");
-  const [eventDate, setEventDate] = useState("");
-  const [startTime, setStartTime] = useState("16:00");
-  const [endTime, setEndTime] = useState("21:00");
-  const [scheduleFeedback, setScheduleFeedback] = useState<{
-    type: "error" | "success";
-    text: string;
-  } | null>(null);
-
-  useEffect(() => {
-    setEventDate(getNowGmt3().dateStr);
-    setIsEmergencyActive(getEmergencyMaintenanceState().active);
+  const loadInitialData = useCallback(async () => {
+    const dataset = await fetchAllFromSupabase();
+    setUsers(dataset.users);
+    setEvents(dataset.events);
+    setEmergencyState(getEmergencyMaintenanceState());
 
     if (typeof window !== "undefined") {
       const params = new URLSearchParams(window.location.search);
-      const tabParam = params.get("tab");
-      const emailParam = params.get("email");
-      const tokenParam = params.get("token");
-
-      if (tabParam === "TROCAR_SENHA" && emailParam && tokenParam) {
-        setLinkEmail(emailParam.trim().toLowerCase());
-        setLinkToken(tokenParam);
-        setActiveTab("TROCAR_SENHA");
+      const token = params.get("resetToken");
+      const email = params.get("email");
+      if (token && email) {
+        setResetTokenParam(token);
+        setResetEmailParam(email);
+        setActiveTab("TROCAR_SENHA_LINK");
       }
     }
-
-    fetchAllFromSupabase().then((cloudData) => {
-      setAllUsers(cloudData.users);
-      setAllEvents(cloudData.events);
-      setIsLoadingCloud(false);
-    });
   }, []);
 
-  const pwCheck = validatePasswordRbac(
-    activeTab === "LOGIN"
-      ? password
-      : activeTab === "TROCAR_SENHA"
-      ? newResetPassword
-      : activeTab === "PRIMEIRO_ACESSO"
-      ? firstAccessNewPassword
-      : clientPassword
-  );
-  const phoneCheck = validateAnatelPhone(clientPhone);
-
-  const currentConflict = allEvents.find(
-    (slot) =>
-      slot.eventDate === eventDate &&
-      slot.status !== "CANCELADO" &&
-      hasScheduleConflict(startTime, endTime, slot.startTime, slot.endTime, 60)
-  );
-
-  const getCleanupEndTime = (end: string) => {
-    const [h, m] = end.split(":").map(Number);
-    if (isNaN(h) || isNaN(m)) return "22:00";
-    const nextH = (h + 1) % 24;
-    return `${String(nextH).padStart(2, "0")}:${String(m).padStart(2, "0")}`;
-  };
-
-  const getTargetRouteForRole = (role: UserAccount["role"]) => {
-    if (role === "ADM" || role === "EQUIPE_INTERNA") return "/admin";
-    if (role === "CLIENTE") return "/cliente";
-    return "/equipe";
-  };
-
-  const handleLogin = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setLoginFeedback(null);
-
-    if (lockedUntil && Date.now() < lockedUntil) {
-      const minLeft = Math.ceil((lockedUntil - Date.now()) / 60000);
-      setLoginFeedback({
-        type: "error",
-        text: `Sessão bloqueada por segurança. Tente novamente em ${minLeft} min ou peça desbloqueio ao ADM.`,
-      });
-      return;
-    }
-
-    const cloudData = await fetchAllFromSupabase();
-    setAllUsers(cloudData.users);
-    const emergencyState = getEmergencyMaintenanceState();
-    setIsEmergencyActive(emergencyState.active);
-
-    const normalizedEmail = email.trim().toLowerCase();
-    const foundUser = cloudData.users.find((u) => u.email.toLowerCase() === normalizedEmail);
-
-    if (!foundUser) {
-      setLoginFeedback({
-        type: "error",
-        text: "E-mail não encontrado no Supabase. Cadastre-se em 'Agende seu evento' ou peça ao ADM para criar seu perfil.",
-      });
-      return;
-    }
-
-    if (foundUser.status === "INATIVO") {
-      setLoginFeedback({
-        type: "error",
-        text: "Esta conta está marcada como INATIVA pelo Administrador.",
-      });
-      return;
-    }
-
-    // CARDS #45 e #46: Impede login se o usuário estiver com status BLOQUEADO no banco
-    if (foundUser.status === "BLOQUEADO") {
-      setLoginFeedback({
-        type: "error",
-        text: emergencyState.active
-          ? "🚨 Sistema em Modo de Emergência/Manutenção. Apenas o perfil ADM pode acessar no momento."
-          : "🔒 Esta conta está com status BLOQUEADO no sistema após tentativas de erro. Solicite o desbloqueio ao ADM ou redefina sua senha em 'Esqueci minha senha'.",
-      });
-      return;
-    }
-
-    // CARD #46: Contabiliza falhas e grava status BLOQUEADO no Supabase na 5ª tentativa
-    if (!pwCheck.isValid || foundUser.password !== password) {
-      const newFailures = failedAttempts + 1;
-      setFailedAttempts(newFailures);
-
-      if (newFailures >= MAX_LOGIN_ATTEMPTS) {
-        const lockTime = Date.now() + LOCKOUT_MINUTES * 60 * 1000;
-        setLockedUntil(lockTime);
-
-        const updatedUsers = await lockUserAccountByEmailInSupabase(
-          normalizedEmail,
-          cloudData.users
-        );
-        setAllUsers(updatedUsers);
-
-        setLoginFeedback({
-          type: "error",
-          text: `Tentativa 5 de 5 · Sua conta (${normalizedEmail}) recebeu status BLOQUEADO no Supabase por segurança.`,
-        });
-      } else {
-        setLoginFeedback({
-          type: "error",
-          text: `Senha incorreta ou fora do padrão RBAC. Tentativa ${newFailures} de ${MAX_LOGIN_ATTEMPTS} antes do bloqueio da conta.`,
-        });
-      }
-      return;
-    }
-
-    // CARD #42: Ao logar pela primeira vez, obriga todos os perfis a trocarem a senha
-    if (isFirstLoginPasswordChangeRequired(foundUser)) {
-      setFirstAccessUser(foundUser);
-      setFirstAccessNewPassword("");
-      setFirstAccessConfirmPassword("");
-      setFirstAccessFeedback(null);
-      setActiveTab("PRIMEIRO_ACESSO");
-      return;
-    }
-
-    const daysRemaining = getPasswordDaysRemaining(foundUser.passwordChangedAtIso);
-    if (daysRemaining <= 0) {
-      setLoginFeedback({
-        type: "warn",
-        text: "Sua senha completou 90 dias e expirou! Use a aba 'Esqueci minha senha' para renová-la.",
-      });
-      return;
-    }
-
-    setFailedAttempts(0);
-    setLockedUntil(null);
-    setCurrentUserSession(foundUser);
-
-    const corpInfo = getCorporateIdentityInfo(foundUser);
-    const targetRoute = getTargetRouteForRole(foundUser.role);
-
-    setLoginFeedback({
-      type: "success",
-      text: `Autenticado [${corpInfo.corporateCode}]! Bem-vindo(a), ${foundUser.name} (${foundUser.role})...`,
-    });
-
-    setTimeout(() => {
-      window.location.href = targetRoute;
-    }, 600);
-  };
-
-  // CARD #42: Confirmação da Troca Obrigatória de Senha no 1º Acesso
-  const handleConfirmFirstAccessPassword = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setFirstAccessFeedback(null);
-
-    if (!firstAccessUser) return;
-
-    if (!pwCheck.isValid) {
-      setFirstAccessFeedback({
-        type: "error",
-        text: "A nova senha deve cumprir todos os requisitos RBAC (mínimo de 8 caracteres, especial, maiúscula, minúscula e número).",
-      });
-      return;
-    }
-
-    if (firstAccessNewPassword === firstAccessUser.password) {
-      setFirstAccessFeedback({
-        type: "error",
-        text: "Por segurança, a sua nova senha pessoal deve ser diferente da senha provisória do primeiro acesso.",
-      });
-      return;
-    }
-
-    if (firstAccessNewPassword !== firstAccessConfirmPassword) {
-      setFirstAccessFeedback({
-        type: "error",
-        text: "A confirmação da nova senha não confere.",
-      });
-      return;
-    }
-
-    const updatedIso = markIsoPasswordChanged();
-    const updatedUser: UserAccount = {
-      ...firstAccessUser,
-      password: firstAccessNewPassword,
-      passwordChangedAtIso: updatedIso,
-      mustChangePassword: false,
-      status: "ATIVO",
-    };
-
-    const cloudData = await fetchAllFromSupabase();
-    const updatedUsers = cloudData.users.map((u) =>
-      u.id === updatedUser.id || u.email.toLowerCase() === updatedUser.email.toLowerCase()
-        ? updatedUser
-        : u
-    );
-
-    setAllUsers(updatedUsers);
-    await saveUsersToStorage(updatedUsers);
-    setCurrentUserSession(updatedUser);
-
-    const targetRoute = getTargetRouteForRole(updatedUser.role);
-    setFirstAccessFeedback({
-      type: "success",
-      text: "✓ Nova senha pessoal gravada no Supabase! Liberando seu acesso ao portal...",
-    });
-
-    setTimeout(() => {
-      window.location.href = targetRoute;
-    }, 800);
-  };
-
-  const handleSendRecoveryEmail = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setRecoveryFeedback(null);
-    setIsSendingEmail(true);
-
+  const refreshApisHealth = useCallback(async () => {
+    setIsCheckingApis(true);
     try {
-      const cloudData = await fetchAllFromSupabase();
-      const targetEmail = recoveryEmail.trim().toLowerCase();
-      const foundUser = cloudData.users.find((u) => u.email.toLowerCase() === targetEmail);
-
-      if (!foundUser) {
-        setRecoveryFeedback({
-          type: "error",
-          text: "Não encontramos nenhuma conta cadastrada no Supabase com este e-mail.",
-        });
-        setIsSendingEmail(false);
-        return;
-      }
-
-      const token = createResetToken(foundUser.email);
-      const origin = typeof window !== "undefined" ? window.location.origin : "http://localhost:3000";
-      const resetUrl = `${origin}/?tab=TROCAR_SENHA&email=${encodeURIComponent(
-        foundUser.email
-      )}&token=${encodeURIComponent(token)}`;
-
-      const response = await fetch("/api/recover-password", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          email: foundUser.email,
-          userName: foundUser.name,
-          resetUrl,
-        }),
-      });
-
-      const result = await response.json();
-
-      if (!response.ok) {
-        setRecoveryFeedback({
-          type: "error",
-          text: result.error || "Não foi possível enviar o e-mail pelo Gmail. Verifique as variáveis na Netlify.",
-        });
-        setIsSendingEmail(false);
-        return;
-      }
-
-      setRecoveryFeedback({
-        type: "success",
-        text: `✓ E-mail real enviado com sucesso para ${foundUser.email}! Abra sua caixa de entrada do Gmail e clique no botão para redefinir sua senha.`,
-      });
-    } catch {
-      setRecoveryFeedback({
-        type: "error",
-        text: "Erro de conexão ao tentar disparar o e-mail de recuperação.",
-      });
+      const results = await checkAllApisHealth();
+      setApiStatuses(results);
     } finally {
-      setIsSendingEmail(false);
+      setIsCheckingApis(false);
     }
-  };
+  }, []);
 
-  const handleConfirmPasswordFromLink = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setResetTabFeedback(null);
+  useEffect(() => {
+    loadInitialData();
+    refreshApisHealth();
+  }, [loadInitialData, refreshApisHealth]);
 
-    const tokenCheck = verifyResetToken(linkToken, linkEmail);
-    if (!tokenCheck.valid) {
-      setResetTabFeedback({
-        type: "error",
-        text: tokenCheck.reason || "Link expirado ou inválido.",
-      });
-      return;
-    }
-
-    if (!pwCheck.isValid) {
-      setResetTabFeedback({
-        type: "error",
-        text: "A nova senha deve cumprir todos os requisitos RBAC (mínimo de 8 caracteres, caractere especial, maiúscula, minúscula e número).",
-      });
-      return;
-    }
-
-    if (newResetPassword !== confirmResetPassword) {
-      setResetTabFeedback({
-        type: "error",
-        text: "A confirmação da senha não coincide com a nova senha digitada.",
-      });
-      return;
-    }
-
-    const cloudData = await fetchAllFromSupabase();
-    const foundUser = cloudData.users.find((u) => u.email.toLowerCase() === linkEmail.trim().toLowerCase());
-
-    if (!foundUser) {
-      setResetTabFeedback({
-        type: "error",
-        text: "Conta não localizada no Supabase para este e-mail.",
-      });
-      return;
-    }
-
-    const nowIso = markIsoPasswordChanged();
-    const updatedUsers = cloudData.users.map((u) =>
-      u.email.toLowerCase() === linkEmail.trim().toLowerCase()
-        ? {
-            ...u,
-            password: newResetPassword,
-            passwordChangedAtIso: nowIso,
-            mustChangePassword: false,
-            status: u.status === "BLOQUEADO" ? ("ATIVO" as const) : u.status,
-          }
-        : u
-    );
-
-    setAllUsers(updatedUsers);
-    await saveUsersToStorage(updatedUsers);
-
-    if (typeof window !== "undefined") {
-      window.history.replaceState({}, document.title, "/");
-    }
-
-    setEmail(linkEmail);
-    setNewResetPassword("");
-    setConfirmResetPassword("");
-    setFailedAttempts(0);
-    setLockedUntil(null);
-    setResetTabFeedback({
-      type: "success",
-      text: "✓ Senha alterada e conta desbloqueada no Supabase! Redirecionando para o Login...",
-    });
-
-    setTimeout(() => {
-      setActiveTab("LOGIN");
-      setLoginFeedback({
-        type: "success",
-        text: "✓ Sua senha foi redefinida com sucesso! Entre com a nova senha abaixo.",
-      });
-    }, 1200);
-  };
-
-  const handlePreSchedule = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setScheduleFeedback(null);
-
-    if (!phoneCheck.valid) {
-      setScheduleFeedback({ type: "error", text: phoneCheck.error || "Telefone inválido na regra ANATEL." });
-      return;
-    }
-    if (!pwCheck.isValid) {
-      setScheduleFeedback({
-        type: "error",
-        text: "A senha precisa cumprir os requisitos RBAC (mínimo de 8 caracteres e caractere especial).",
-      });
-      return;
-    }
-    if (!guestCount.trim() || Number(guestCount) <= 0) {
-      setScheduleFeedback({ type: "error", text: "Informe uma quantidade de pessoas válida." });
-      return;
-    }
-    if (endTime <= startTime) {
-      setScheduleFeedback({ type: "error", text: "O horário de término deve ser maior que o início." });
-      return;
-    }
-    if (currentConflict) {
-      setScheduleFeedback({
-        type: "error",
-        text: `Conflito de horário com "${currentConflict.title}" (${currentConflict.startTime} às ${currentConflict.endTime} + 1h limpeza).`,
-      });
-      return;
-    }
-
-    const cloudData = await fetchAllFromSupabase();
-    const normalizedEmail = clientEmail.trim().toLowerCase();
-    const existingUser = cloudData.users.find((u) => u.email.toLowerCase() === normalizedEmail);
-    const shortId = `CLI-${Math.floor(1000 + Math.random() * 9000)}`;
-
-    let loggedUser: UserAccount;
-
-    if (existingUser) {
-      loggedUser = existingUser;
-    } else {
-      // CARD #42: Marca a conta recém-criada para exigir atualização de senha no primeiro login via formulário
-      const firstLoginIso = markIsoForFirstLogin();
-      loggedUser = {
-        id: shortId,
-        corporateId: `CDH-CLI-${shortId.split("-")[1]}`,
-        name: clientName.trim(),
-        email: normalizedEmail,
-        phoneAnatel: phoneCheck.formatted || clientPhone,
-        password: clientPassword,
-        role: "CLIENTE",
-        status: "ATIVO",
-        passwordChangedAtIso: firstLoginIso,
-        mustChangePassword: true,
-      };
-      const updatedUsers = [loggedUser, ...cloudData.users];
-      setAllUsers(updatedUsers);
-      await saveUsersToStorage(updatedUsers);
-    }
-
-    const formattedGuests = guestCount.includes("pessoa") ? guestCount : `${guestCount} pessoas`;
-
-    const newEvent: EventRecord = {
-      id: `EV-${Math.floor(1000 + Math.random() * 9000)}`,
-      title: eventTitle || `${eventType} (${formattedGuests})`,
-      eventType,
-      honoreeName: formattedGuests,
-      clientName: loggedUser.name,
-      clientEmail: loggedUser.email,
-      responsibleAdmin: "ADM a confirmar",
-      eventDate,
-      startTime,
-      endTime,
-      status: "PENDENTE",
-      supportTeam: ["A definir pelo ADM"],
-      confirmedStaff: [],
-    };
-    const updatedEvents = [newEvent, ...cloudData.events];
-    setAllEvents(updatedEvents);
-    await saveEventsToStorage(updatedEvents);
-
-    setCurrentUserSession(loggedUser);
-
-    setScheduleFeedback({
-      type: "success",
-      text: "Conta e reserva salvas no Supabase! Abrindo sua Área do Cliente...",
-    });
-
-    setTimeout(() => {
-      window.location.href = "/cliente";
-    }, 900);
-  };
+  const onlineApiCount = apiStatuses.filter(
+    (api) => api.status === "ONLINE"
+  ).length;
 
   return (
-    <div className="min-h-screen bg-[#0A0E17] text-slate-100 flex flex-col justify-between font-sans selection:bg-amber-500 selection:text-slate-950">
-      {/* CONTAINER 1: CABEÇALHO CORPORATIVO */}
-      <header className="w-full border-b border-slate-800/80 bg-[#0D121E]/90 backdrop-blur-md">
-        <div className="max-w-7xl mx-auto px-4 sm:px-8 h-20 flex items-center justify-between gap-4">
+    <div className="min-h-screen bg-[#0A0E17] text-slate-100 flex flex-col">
+      {/* Modular Public Header Container (Cards #1, #29, #43, #50) */}
+      <header className="bg-[#111726]/95 border-b border-slate-800 sticky top-0 z-30 backdrop-blur-md">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 py-4 flex flex-wrap items-center justify-between gap-4">
           <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-xl bg-amber-500/15 border border-amber-500/40 flex items-center justify-center text-amber-400 text-lg font-bold shadow-inner">
+            <div className="w-11 h-11 rounded-2xl bg-amber-500/15 border border-amber-500/40 flex items-center justify-center text-amber-300 font-black text-base">
               🔥
             </div>
-            <div className="leading-tight">
-              <span className="block font-extrabold text-lg tracking-tight text-white">churrasco</span>
-              <span className="block text-[10px] font-bold tracking-[0.22em] text-amber-500 uppercase">
-                DOS DA HORA
+            <div>
+              <span className="text-[10px] font-black uppercase tracking-widest text-amber-400">
+                Sistema de Gestão Familiar & Eventos · GMT-3
               </span>
+              <h1 className="text-lg sm:text-xl font-black text-white">
+                Churrasco dos Da Hora
+              </h1>
             </div>
           </div>
 
-          <div className="flex items-center gap-3">
-            {isEmergencyActive && (
-              <span className="px-3 py-1 rounded-full bg-red-500/15 border border-red-500/40 text-red-400 text-[10px] font-extrabold uppercase tracking-wider">
-                🚨 Manutenção Ativa (Apenas ADM)
-              </span>
-            )}
-            <div className="flex items-center gap-2 text-[11px] font-semibold tracking-[0.16em] text-slate-400 uppercase bg-[#111726] border border-slate-800 px-3.5 py-1.5 rounded-full">
-              <span className="w-2 h-2 rounded-full bg-emerald-400" />
-              <span>{isLoadingCloud ? "CONECTANDO SUPABASE..." : "SUPABASE & NETLIFY SMTP ATIVOS"}</span>
-            </div>
+          <button
+            type="button"
+            onClick={() => {
+              refreshApisHealth();
+              setIsApiModalOpen(true);
+            }}
+            className="min-h-[44px] px-3.5 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 border border-slate-700 text-xs font-bold text-emerald-300 flex items-center gap-2"
+          >
+            <span className="w-2 h-2 rounded-full bg-emerald-400 animate-ping" />
+            <span>
+              Status APIs ({onlineApiCount}/{apiStatuses.length || 4} Online)
+            </span>
+          </button>
+        </div>
+
+        {/* Navigation Bar with "Agende seu evento" separated on the left (Card #29) */}
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 pb-3 flex flex-wrap items-center justify-between gap-3">
+          <button
+            type="button"
+            onClick={() => setActiveTab("AGENDE_EVENTO")}
+            className={`min-h-[44px] px-4 py-2 rounded-xl text-xs font-black transition-all ${
+              activeTab === "AGENDE_EVENTO"
+                ? "bg-emerald-500 text-slate-950 shadow-md"
+                : "bg-emerald-500/15 text-emerald-300 border border-emerald-500/40 hover:bg-emerald-500/25"
+            }`}
+          >
+            📅 Agende seu evento
+          </button>
+
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => setActiveTab("LOGIN")}
+              className={`min-h-[44px] px-4 py-2 rounded-xl text-xs font-bold transition-all ${
+                activeTab === "LOGIN"
+                  ? "bg-amber-500 text-slate-950 font-black"
+                  : "bg-slate-900 text-slate-300 border border-slate-800 hover:bg-slate-800"
+              }`}
+            >
+              Login
+            </button>
+            <button
+              type="button"
+              onClick={() => setActiveTab("ESQUECI_SENHA")}
+              className={`min-h-[44px] px-4 py-2 rounded-xl text-xs font-bold transition-all ${
+                activeTab === "ESQUECI_SENHA"
+                  ? "bg-amber-500 text-slate-950 font-black"
+                  : "bg-slate-900 text-slate-300 border border-slate-800 hover:bg-slate-800"
+              }`}
+            >
+              Esqueci minha senha
+            </button>
           </div>
         </div>
       </header>
 
-      {/* CONTAINER 2: CORPO PRINCIPAL EM DUAS COLUNAS */}
-      <main className="max-w-7xl w-full mx-auto px-4 sm:px-8 py-8 lg:py-12 grid grid-cols-1 lg:grid-cols-12 gap-10 lg:gap-12 items-start">
-        {/* CONTAINER ESQUERDO: APRESENTAÇÃO E IDENTIDADE CORPORATIVA */}
-        <section className="lg:col-span-6 space-y-8 lg:pt-4">
-          <div className="inline-flex items-center gap-2 px-3.5 py-1.5 rounded-full bg-amber-500/10 border border-amber-500/30 text-amber-400 text-[11px] font-bold tracking-[0.14em] uppercase">
-            <span className="w-1.5 h-1.5 rounded-full bg-amber-400" />
-            {activeTab === "AGENDE_EVENTO"
-              ? "SEU PRÓXIMO BOM MOMENTO COMEÇA AQUI"
-              : activeTab === "PRIMEIRO_ACESSO"
-              ? "SEGURANÇA RBAC · TROCA OBRIGATÓRIA NO 1º LOGIN"
-              : activeTab === "TROCAR_SENHA"
-              ? "REDEFINIÇÃO SEGURA DE SENHA VIA LINK DO GMAIL"
-              : "SISTEMA DE IDENTIDADE CORPORATIVA · CDH"}
-          </div>
+      <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 py-8">
+        {activeTab === "LOGIN" && (
+          <LoginTab
+            allUsers={users}
+            emergencyState={emergencyState}
+            onUsersUpdated={setUsers}
+            onRequireFirstLoginReset={(user) => {
+              setFirstAccessUser(user);
+              setActiveTab("PRIMEIRO_ACESSO");
+            }}
+            onNavigateForgotPassword={() => setActiveTab("ESQUECI_SENHA")}
+          />
+        )}
 
-          <div className="space-y-4">
-            <h1 className="text-4xl sm:text-5xl lg:text-[54px] font-extrabold tracking-tight leading-[1.08] text-white">
-              Os melhores <span className="text-amber-500">encontros</span> começam aqui.
-            </h1>
-            <p className="text-base sm:text-lg text-slate-400 max-w-xl leading-relaxed">
-              Plataforma corporativa em nuvem via Supabase com governança RBAC, bloqueio automático contra tentativas inválidas e notificações por e-mail.
-            </p>
-          </div>
+        {activeTab === "PRIMEIRO_ACESSO" && firstAccessUser && (
+          <FirstAccessPasswordTab
+            pendingUser={firstAccessUser}
+            allUsers={users}
+            onUsersUpdated={setUsers}
+            onCancelFirstAccess={() => {
+              setFirstAccessUser(null);
+              setActiveTab("LOGIN");
+            }}
+          />
+        )}
 
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 pt-2 border-t border-slate-800/80 max-w-lg text-xs">
-            <div className="bg-[#111726] border border-slate-800 p-3.5 rounded-2xl shadow-md">
-              <span className="text-amber-400 font-bold block">CDH-ADM</span>
-              <span className="text-slate-400 text-[11px]">Gestão + Backup</span>
-            </div>
-            <div className="bg-[#111726] border border-slate-800 p-3.5 rounded-2xl shadow-md">
-              <span className="text-purple-400 font-bold block">CDH-INT</span>
-              <span className="text-slate-400 text-[11px]">Visão do espaço</span>
-            </div>
-            <div className="bg-[#111726] border border-slate-800 p-3.5 rounded-2xl shadow-md">
-              <span className="text-emerald-400 font-bold block">CDH-EXT</span>
-              <span className="text-slate-400 text-[11px]">Escala e turnos</span>
-            </div>
-            <div className="bg-[#111726] border border-slate-800 p-3.5 rounded-2xl shadow-md">
-              <span className="text-sky-400 font-bold block">CDH-CLI</span>
-              <span className="text-slate-400 text-[11px]">Reservas online</span>
-            </div>
-          </div>
-        </section>
+        {activeTab === "ESQUECI_SENHA" && (
+          <ForgotPasswordTab
+            allUsers={users}
+            onBackToLogin={() => setActiveTab("LOGIN")}
+          />
+        )}
 
-        {/* CONTAINER DIREITO: CARD DE AUTENTICAÇÃO, 1º ACESSO E AGENDAMENTO */}
-        <section className="lg:col-span-6 w-full max-w-xl mx-auto">
-          <div className="bg-[#111726] border border-slate-800/90 rounded-3xl p-6 sm:p-8 shadow-2xl">
-            <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3 mb-7 pb-4 border-b border-slate-800/80">
-              <button
-                type="button"
-                onClick={() => setActiveTab("AGENDE_EVENTO")}
-                className={`py-2.5 px-4 rounded-xl text-xs sm:text-sm transition-all border flex items-center justify-center gap-2 ${
-                  activeTab === "AGENDE_EVENTO"
-                    ? "bg-[#F59E0B] text-slate-950 border-amber-400 font-extrabold shadow-lg shadow-amber-500/20"
-                    : "bg-[#0A0E17] text-amber-400 border-amber-500/40 hover:bg-amber-500/10 font-bold"
-                }`}
-              >
-                <span>📅</span>
-                <span>Agende seu evento</span>
-              </button>
+        {activeTab === "TROCAR_SENHA_LINK" && (
+          <ResetPasswordFromLinkTab
+            resetEmail={resetEmailParam}
+            resetToken={resetTokenParam}
+            allUsers={users}
+            onUsersUpdated={setUsers}
+            onSuccessRedirectLogin={() => setActiveTab("LOGIN")}
+          />
+        )}
 
-              <div className="grid grid-cols-2 gap-1.5 bg-[#0A0E17] p-1.5 rounded-2xl border border-slate-800">
-                <button
-                  type="button"
-                  onClick={() => setActiveTab("LOGIN")}
-                  className={`py-2 px-3.5 rounded-xl text-xs sm:text-sm transition-all ${
-                    activeTab === "LOGIN" || activeTab === "PRIMEIRO_ACESSO"
-                      ? "bg-[#F59E0B] text-slate-950 font-extrabold shadow-md"
-                      : "text-slate-400 hover:text-white font-semibold"
-                  }`}
-                >
-                  {activeTab === "PRIMEIRO_ACESSO" ? "1º Acesso" : "Login"}
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setActiveTab("ESQUECI_SENHA")}
-                  className={`py-2 px-3.5 rounded-xl text-xs sm:text-sm transition-all ${
-                    activeTab === "ESQUECI_SENHA" || activeTab === "TROCAR_SENHA"
-                      ? "bg-[#F59E0B] text-slate-950 font-extrabold shadow-md"
-                      : "text-slate-400 hover:text-white font-semibold"
-                  }`}
-                >
-                  {activeTab === "TROCAR_SENHA" ? "Nova senha" : "Esqueci minha senha"}
-                </button>
-              </div>
-            </div>
-
-            {/* ABA 1: LOGIN */}
-            {activeTab === "LOGIN" && (
-              <form onSubmit={handleLogin} className="space-y-5">
-                <div>
-                  <h2 className="text-2xl sm:text-3xl font-extrabold text-white">Que bom ter você aqui.</h2>
-                  <p className="text-xs sm:text-sm text-slate-400 mt-1">
-                    Entre com sua conta (ADM, Equipe Interna, Equipe Externa ou Cliente).
-                  </p>
-                </div>
-
-                <div>
-                  <label className="block text-xs font-semibold text-slate-300 mb-2">E-mail</label>
-                  <input
-                    type="email"
-                    required
-                    value={email}
-                    onChange={(e) => setEmail(e.target.value)}
-                    className="w-full bg-[#0A0E17] border border-slate-800 focus:border-amber-500/70 rounded-xl px-4 py-3.5 text-sm text-white outline-none transition"
-                    placeholder="seuemail@exemplo.com"
-                  />
-                </div>
-
-                <div>
-                  <label className="block text-xs font-semibold text-slate-300 mb-2">Senha</label>
-                  <div className="relative">
-                    <input
-                      type={showPassword ? "text" : "password"}
-                      required
-                      value={password}
-                      onChange={(e) => setPassword(e.target.value)}
-                      className="w-full bg-[#0A0E17] border border-slate-800 focus:border-amber-500/70 rounded-xl px-4 py-3.5 text-sm text-white outline-none transition"
-                      placeholder="••••••••••••"
-                    />
-                    <button
-                      type="button"
-                      onClick={() => setShowPassword(!showPassword)}
-                      className="absolute right-4 top-1/2 -translate-y-1/2 text-slate-400 hover:text-white text-xs"
-                    >
-                      {showPassword ? "🙈" : "👁️"}
-                    </button>
-                  </div>
-                </div>
-
-                <div className="bg-[#0A0E17] border border-slate-800/90 rounded-2xl p-4 space-y-3">
-                  <div className="flex items-center justify-between text-xs font-bold text-slate-200">
-                    <div className="flex items-center gap-2">
-                      <span className="text-amber-500">🔒</span>
-                      <span>RBAC de Senha</span>
-                    </div>
-                    <span className="text-[11px] text-slate-400">
-                      Tentativas: {failedAttempts}/{MAX_LOGIN_ATTEMPTS}
-                    </span>
-                  </div>
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 text-xs">
-                    <div className={pwCheck.minLength ? "text-emerald-400 font-semibold" : "text-slate-500"}>
-                      ✓ <span className="text-slate-300 ml-1">Tamanho mínimo (8+ caracteres)</span>
-                    </div>
-                    <div className={pwCheck.hasSpecial ? "text-emerald-400 font-semibold" : "text-slate-500"}>
-                      ✓ <span className="text-slate-300 ml-1">Caractere especial (!@#$%)</span>
-                    </div>
-                    <div className={pwCheck.hasUpper && pwCheck.hasLower ? "text-emerald-400" : "text-slate-500"}>
-                      ✓ <span className="text-slate-300 ml-1">Maiúscula e minúscula</span>
-                    </div>
-                    <div className={pwCheck.hasNumber ? "text-emerald-400" : "text-slate-500"}>
-                      ✓ <span className="text-slate-300 ml-1">Pelo menos 1 número</span>
-                    </div>
-                  </div>
-                </div>
-
-                {loginFeedback && (
-                  <div
-                    className={`px-4 py-3 rounded-xl text-xs font-medium border leading-relaxed ${
-                      loginFeedback.type === "success"
-                        ? "bg-emerald-950/50 border-emerald-500/40 text-emerald-300"
-                        : "bg-red-950/50 border-red-500/40 text-red-300"
-                    }`}
-                  >
-                    {loginFeedback.text}
-                  </div>
-                )}
-
-                <button
-                  type="submit"
-                  className="w-full bg-[#F59E0B] hover:bg-amber-400 text-slate-950 font-bold py-4 px-6 rounded-2xl transition flex items-center justify-between text-sm shadow-lg shadow-amber-500/10"
-                >
-                  <span>Entrar no sistema</span>
-                  <span className="text-lg">→</span>
-                </button>
-              </form>
-            )}
-
-            {/* ABA 2 (CARD #42): TROCA OBRIGATÓRIA DE SENHA NO PRIMEIRO LOGIN (TODOS OS PERFIS) */}
-            {activeTab === "PRIMEIRO_ACESSO" && firstAccessUser && (
-              <form onSubmit={handleConfirmFirstAccessPassword} className="space-y-5">
-                <div className="bg-amber-500/10 border border-amber-500/30 rounded-2xl p-4 space-y-1.5">
-                  <div className="flex items-center justify-between">
-                    <span className="text-[10px] font-extrabold uppercase tracking-wider text-amber-400">
-                      🔐 PRIMEIRO LOGIN DETECTADO · {firstAccessUser.role}
-                    </span>
-                    <span className="text-[11px] font-mono text-white bg-[#0A0E17] px-2.5 py-0.5 rounded-lg border border-slate-800">
-                      {getCorporateIdentityInfo(firstAccessUser).corporateCode}
-                    </span>
-                  </div>
-                  <h2 className="text-xl font-extrabold text-white">
-                    Olá, {firstAccessUser.name}! Troque sua senha inicial.
-                  </h2>
-                  <p className="text-xs text-slate-300 leading-relaxed">
-                    Por segurança RBAC, todos os perfis devem cadastrar uma nova senha pessoal no primeiro acesso antes de utilizar o painel.
-                  </p>
-                </div>
-
-                <div>
-                  <label className="block text-xs font-semibold text-slate-300 mb-2">
-                    Nova senha pessoal RBAC (diferente da senha inicial) *
-                  </label>
-                  <div className="relative">
-                    <input
-                      type={showFirstAccessPassword ? "text" : "password"}
-                      required
-                      value={firstAccessNewPassword}
-                      onChange={(e) => setFirstAccessNewPassword(e.target.value)}
-                      placeholder="Digite sua nova senha pessoal"
-                      className="w-full bg-[#0A0E17] border border-slate-800 focus:border-amber-500/70 rounded-xl px-4 py-3.5 text-sm text-white outline-none"
-                    />
-                    <button
-                      type="button"
-                      onClick={() => setShowFirstAccessPassword(!showFirstAccessPassword)}
-                      className="absolute right-4 top-1/2 -translate-y-1/2 text-slate-400 hover:text-white text-xs"
-                    >
-                      {showFirstAccessPassword ? "🙈" : "👁️"}
-                    </button>
-                  </div>
-                </div>
-
-                <div>
-                  <label className="block text-xs font-semibold text-slate-300 mb-2">
-                    Confirme sua nova senha pessoal *
-                  </label>
-                  <input
-                    type={showFirstAccessPassword ? "text" : "password"}
-                    required
-                    value={firstAccessConfirmPassword}
-                    onChange={(e) => setFirstAccessConfirmPassword(e.target.value)}
-                    placeholder="Repita a nova senha"
-                    className="w-full bg-[#0A0E17] border border-slate-800 focus:border-amber-500/70 rounded-xl px-4 py-3.5 text-sm text-white outline-none"
-                  />
-                </div>
-
-                <div className="bg-[#0A0E17] border border-slate-800/90 rounded-2xl p-4 space-y-2.5">
-                  <p className="text-xs font-bold text-slate-200">Checklist obrigatório RBAC:</p>
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs">
-                    <div className={pwCheck.minLength ? "text-emerald-400 font-bold" : "text-slate-500"}>
-                      ✓ Mínimo de 8 caracteres
-                    </div>
-                    <div className={pwCheck.hasSpecial ? "text-emerald-400 font-bold" : "text-slate-500"}>
-                      ✓ Caractere especial (!@#$%)
-                    </div>
-                    <div className={pwCheck.hasUpper && pwCheck.hasLower ? "text-emerald-400 font-bold" : "text-slate-500"}>
-                      ✓ Letra maiúscula e minúscula
-                    </div>
-                    <div className={pwCheck.hasNumber ? "text-emerald-400 font-bold" : "text-slate-500"}>
-                      ✓ Pelo menos 1 número
-                    </div>
-                  </div>
-                </div>
-
-                {firstAccessFeedback && (
-                  <div
-                    className={`p-3.5 rounded-xl text-xs font-medium border ${
-                      firstAccessFeedback.type === "success"
-                        ? "bg-emerald-950/60 border-emerald-500 text-emerald-200"
-                        : "bg-red-950/60 border-red-500 text-red-200"
-                    }`}
-                  >
-                    {firstAccessFeedback.text}
-                  </div>
-                )}
-
-                <div className="flex gap-3">
-                  <button
-                    type="submit"
-                    className="flex-1 bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-extrabold py-4 px-6 rounded-2xl transition text-sm shadow-lg shadow-emerald-500/10"
-                  >
-                    ✓ Salvar nova senha e acessar painel →
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setFirstAccessUser(null);
-                      setActiveTab("LOGIN");
-                    }}
-                    className="bg-[#0A0E17] hover:bg-slate-800 text-slate-300 border border-slate-800 font-bold px-4 rounded-2xl text-xs"
-                  >
-                    Voltar
-                  </button>
-                </div>
-              </form>
-            )}
-
-            {/* ABA 3: ESQUECI MINHA SENHA */}
-            {activeTab === "ESQUECI_SENHA" && (
-              <div className="space-y-5">
-                <div>
-                  <h2 className="text-2xl font-extrabold text-white">Recuperar acesso via Gmail</h2>
-                  <p className="text-xs sm:text-sm text-slate-400 mt-1">
-                    Digite seu e-mail cadastrado. Enviaremos uma mensagem real com o link direto para a aba de troca de senha e desbloqueio.
-                  </p>
-                </div>
-
-                <form onSubmit={handleSendRecoveryEmail} className="space-y-4">
-                  <div>
-                    <label className="block text-xs font-semibold text-slate-300 mb-2">
-                      E-mail cadastrado na sua conta
-                    </label>
-                    <input
-                      type="email"
-                      required
-                      value={recoveryEmail}
-                      onChange={(e) => setRecoveryEmail(e.target.value)}
-                      placeholder="seuemail@gmail.com"
-                      className="w-full bg-[#0A0E17] border border-slate-800 rounded-xl px-4 py-3.5 text-sm text-white outline-none"
-                    />
-                  </div>
-                  <button
-                    type="submit"
-                    disabled={isSendingEmail}
-                    className="w-full bg-[#F59E0B] hover:bg-amber-400 disabled:opacity-50 text-slate-950 font-extrabold py-4 px-6 rounded-2xl transition text-sm"
-                  >
-                    {isSendingEmail ? "Enviando e-mail para o Gmail..." : "Enviar link de recuperação por e-mail →"}
-                  </button>
-                </form>
-
-                {recoveryFeedback && (
-                  <div
-                    className={`p-4 rounded-2xl text-xs border leading-relaxed ${
-                      recoveryFeedback.type === "success"
-                        ? "bg-emerald-950/50 border-emerald-500/30 text-emerald-300"
-                        : "bg-red-950/50 border-red-500/30 text-red-300"
-                    }`}
-                  >
-                    {recoveryFeedback.text}
-                  </div>
-                )}
-              </div>
-            )}
-
-            {/* ABA 4: TROCAR SENHA (ABERTA PELO LINK DO GMAIL) */}
-            {activeTab === "TROCAR_SENHA" && (
-              <form onSubmit={handleConfirmPasswordFromLink} className="space-y-5">
-                <div className="flex items-center justify-between border-b border-slate-800 pb-3">
-                  <div>
-                    <span className="text-[10px] font-bold uppercase tracking-wider text-amber-400">
-                      LINK DE RECUPERAÇÃO VERIFICADO
-                    </span>
-                    <h2 className="text-2xl font-extrabold text-white mt-0.5">Criar Nova Senha</h2>
-                  </div>
-                  <span className="text-xs font-mono bg-[#0A0E17] border border-slate-800 px-3 py-1.5 rounded-xl text-emerald-400">
-                    {linkEmail || "E-mail"}
-                  </span>
-                </div>
-
-                <div>
-                  <label className="block text-xs font-semibold text-slate-300 mb-2">
-                    Nova senha RBAC *
-                  </label>
-                  <div className="relative">
-                    <input
-                      type={showResetPassword ? "text" : "password"}
-                      required
-                      value={newResetPassword}
-                      onChange={(e) => setNewResetPassword(e.target.value)}
-                      placeholder="Digite sua nova senha"
-                      className="w-full bg-[#0A0E17] border border-slate-800 focus:border-amber-500/70 rounded-xl px-4 py-3.5 text-sm text-white outline-none"
-                    />
-                    <button
-                      type="button"
-                      onClick={() => setShowResetPassword(!showResetPassword)}
-                      className="absolute right-4 top-1/2 -translate-y-1/2 text-slate-400 hover:text-white text-xs"
-                    >
-                      {showResetPassword ? "🙈" : "👁️"}
-                    </button>
-                  </div>
-                </div>
-
-                <div>
-                  <label className="block text-xs font-semibold text-slate-300 mb-2">
-                    Confirme a nova senha *
-                  </label>
-                  <input
-                    type={showResetPassword ? "text" : "password"}
-                    required
-                    value={confirmResetPassword}
-                    onChange={(e) => setConfirmResetPassword(e.target.value)}
-                    placeholder="Repita sua nova senha"
-                    className="w-full bg-[#0A0E17] border border-slate-800 focus:border-amber-500/70 rounded-xl px-4 py-3.5 text-sm text-white outline-none"
-                  />
-                </div>
-
-                <div className="bg-[#0A0E17] border border-slate-800/90 rounded-2xl p-4 space-y-2.5">
-                  <p className="text-xs font-bold text-slate-200">Requisitos obrigatórios RBAC:</p>
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs">
-                    <div className={pwCheck.minLength ? "text-emerald-400 font-bold" : "text-slate-500"}>
-                      ✓ Mínimo de 8 caracteres
-                    </div>
-                    <div className={pwCheck.hasSpecial ? "text-emerald-400 font-bold" : "text-slate-500"}>
-                      ✓ Caractere especial (!@#$%)
-                    </div>
-                    <div className={pwCheck.hasUpper && pwCheck.hasLower ? "text-emerald-400 font-bold" : "text-slate-500"}>
-                      ✓ Letra maiúscula e minúscula
-                    </div>
-                    <div className={pwCheck.hasNumber ? "text-emerald-400 font-bold" : "text-slate-500"}>
-                      ✓ Pelo menos 1 número
-                    </div>
-                  </div>
-                </div>
-
-                {resetTabFeedback && (
-                  <div
-                    className={`p-3.5 rounded-xl text-xs font-medium border ${
-                      resetTabFeedback.type === "success"
-                        ? "bg-emerald-950/60 border-emerald-500 text-emerald-200"
-                        : "bg-red-950/60 border-red-500 text-red-200"
-                    }`}
-                  >
-                    {resetTabFeedback.text}
-                  </div>
-                )}
-
-                <button
-                  type="submit"
-                  className="w-full bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-extrabold py-4 px-6 rounded-2xl transition text-sm shadow-lg shadow-emerald-500/10"
-                >
-                  ✓ Salvar nova senha no Supabase e ir para o Login
-                </button>
-              </form>
-            )}
-
-            {/* ABA 5: AGENDE SEU EVENTO */}
-            {activeTab === "AGENDE_EVENTO" && (
-              <form onSubmit={handlePreSchedule} className="space-y-5">
-                <h2 className="text-2xl font-extrabold text-white">Vamos planejar seu evento</h2>
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
-                  <div>
-                    <label className="block text-xs font-medium text-slate-300 mb-1">Nome completo</label>
-                    <input
-                      type="text"
-                      required
-                      value={clientName}
-                      onChange={(e) => setClientName(e.target.value)}
-                      className="w-full bg-[#0A0E17] border border-slate-800 rounded-xl px-3.5 py-3 text-sm text-white"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-xs font-medium text-slate-300 mb-1">E-mail</label>
-                    <input
-                      type="email"
-                      required
-                      value={clientEmail}
-                      onChange={(e) => setClientEmail(e.target.value)}
-                      className="w-full bg-[#0A0E17] border border-slate-800 rounded-xl px-3.5 py-3 text-sm text-white"
-                    />
-                  </div>
-                </div>
-
-                <div>
-                  <label className="block text-xs font-medium text-slate-300 mb-1">Telefone ANATEL</label>
-                  <input
-                    type="tel"
-                    required
-                    value={clientPhone}
-                    onChange={(e) => setClientPhone(applyAnatelPhoneMask(e.target.value))}
-                    placeholder="(11) 99987-6543"
-                    className="w-full bg-[#0A0E17] border border-slate-800 rounded-xl px-3.5 py-3 text-sm font-mono text-white"
-                  />
-                </div>
-
-                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                  <div>
-                    <label className="block text-xs font-medium text-slate-300 mb-1">Categoria *</label>
-                    <input
-                      type="text"
-                      required
-                      value={eventType}
-                      onChange={(e) => setEventType(e.target.value)}
-                      placeholder="Ex: Aniversário"
-                      className="w-full bg-[#0A0E17] border border-slate-800 rounded-xl px-3.5 py-3 text-sm text-white"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-xs font-medium text-slate-300 mb-1">Quantidade de pessoas *</label>
-                    <input
-                      type="number"
-                      min="1"
-                      required
-                      value={guestCount}
-                      onChange={(e) => setGuestCount(e.target.value)}
-                      placeholder="Ex: 50"
-                      className="w-full bg-[#0A0E17] border border-slate-800 rounded-xl px-3.5 py-3 text-sm text-white"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-xs font-medium text-slate-300 mb-1">Título do evento</label>
-                    <input
-                      type="text"
-                      required
-                      value={eventTitle}
-                      onChange={(e) => setEventTitle(e.target.value)}
-                      placeholder="Churrasco da Família"
-                      className="w-full bg-[#0A0E17] border border-slate-800 rounded-xl px-3.5 py-3 text-sm text-white"
-                    />
-                  </div>
-                </div>
-
-                <div className="grid grid-cols-3 gap-3">
-                  <div>
-                    <label className="block text-xs font-medium text-slate-300 mb-1">Data</label>
-                    <input
-                      type="date"
-                      required
-                      value={eventDate}
-                      onChange={(e) => setEventDate(e.target.value)}
-                      className="w-full bg-[#0A0E17] border border-slate-800 rounded-xl px-3 py-2.5 text-xs text-white"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-xs font-medium text-slate-300 mb-1">Início</label>
-                    <input
-                      type="time"
-                      required
-                      value={startTime}
-                      onChange={(e) => setStartTime(e.target.value)}
-                      className="w-full bg-[#0A0E17] border border-slate-800 rounded-xl px-3 py-2.5 text-xs text-white"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-xs font-medium text-slate-300 mb-1">Término</label>
-                    <input
-                      type="time"
-                      required
-                      value={endTime}
-                      onChange={(e) => setEndTime(e.target.value)}
-                      className="w-full bg-[#0A0E17] border border-slate-800 rounded-xl px-3 py-2.5 text-xs text-white"
-                    />
-                  </div>
-                </div>
-
-                {!currentConflict && (
-                  <div className="px-4 py-2 rounded-xl bg-emerald-950/50 border border-emerald-500/30 text-emerald-400 text-xs">
-                    ✓ Data disponível · Intervalo de limpeza até {getCleanupEndTime(endTime)}
-                  </div>
-                )}
-
-                <div>
-                  <label className="block text-xs font-medium text-slate-300 mb-1">
-                    Crie sua senha RBAC (mín. 8 caracteres + especial) *
-                  </label>
-                  <div className="relative">
-                    <input
-                      type={showClientPassword ? "text" : "password"}
-                      required
-                      value={clientPassword}
-                      onChange={(e) => setClientPassword(e.target.value)}
-                      className="w-full bg-[#0A0E17] border border-slate-800 rounded-xl px-3.5 py-3 text-sm text-white"
-                    />
-                    <button
-                      type="button"
-                      onClick={() => setShowClientPassword(!showClientPassword)}
-                      className="absolute right-4 top-1/2 -translate-y-1/2 text-slate-400 text-xs"
-                    >
-                      {showClientPassword ? "🙈" : "👁️"}
-                    </button>
-                  </div>
-                </div>
-
-                {scheduleFeedback && (
-                  <div className="p-3.5 rounded-xl text-xs font-medium border bg-emerald-950/60 border-emerald-500 text-emerald-200">
-                    {scheduleFeedback.text}
-                  </div>
-                )}
-
-                <button
-                  type="submit"
-                  className="w-full bg-[#10B981] hover:bg-emerald-400 text-slate-950 font-bold py-4 px-6 rounded-2xl transition text-sm"
-                >
-                  Confirmar solicitação de agendamento →
-                </button>
-              </form>
-            )}
-          </div>
-        </section>
+        {activeTab === "AGENDE_EVENTO" && (
+          <PublicPreScheduleTab
+            events={events}
+            allUsers={users}
+            onEventsUpdated={setEvents}
+            onUsersUpdated={setUsers}
+          />
+        )}
       </main>
+
+      <ApiHealthMonitorModal
+        isOpen={isApiModalOpen}
+        isLoading={isCheckingApis}
+        apiStatuses={apiStatuses}
+        onRefresh={refreshApisHealth}
+        onClose={() => setIsApiModalOpen(false)}
+      />
     </div>
   );
 }
